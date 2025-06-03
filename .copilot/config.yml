@@ -1,0 +1,4 @@
+language: python
+model: gpt-4o
+inline_suggestions: true
+autocomplete_enabled: true
