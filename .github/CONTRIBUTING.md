@@ -6,6 +6,26 @@ Thank you for your interest in contributing to WiFi-Radar! This document provide
 
 Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
+## Code Quality Standards
+
+We maintain high code quality standards using automated tools:
+
+- **Code Formatting**: We use [Black](https://github.com/psf/black) for consistent code formatting
+- **Import Sorting**: We use [isort](https://github.com/PyCQA/isort) to sort imports
+- **Linting**: We use [pylint](https://github.com/PyCQA/pylint) and [flake8](https://github.com/PyCQA/flake8)
+- **Type Checking**: We use [mypy](https://github.com/python/mypy) for optional type checking
+- **Docstrings**: We follow Google docstring style, checked with [pydocstyle](https://github.com/PyCQA/pydocstyle)
+
+Before submitting a pull request, please run:
+
+```bash
+# Install pre-commit hooks
+pre-commit install
+
+# Check code quality
+python scripts/code_quality.py
+```
+
 ## How to Contribute
 
 ### Reporting Bugs
@@ -29,9 +49,10 @@ Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 2. Create a new branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
 4. Run tests (`pytest`)
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
+5. Run code quality checks (`python scripts/code_quality.py`)
+6. Commit your changes (`git commit -m 'Add amazing feature'`)
+7. Push to the branch (`git push origin feature/amazing-feature`)
+8. Open a Pull Request
 
 ## Development Setup
 
@@ -46,6 +67,10 @@ Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md).
    pip install -r requirements.txt
    pip install -e ".[dev]"
    ```
+4. Install pre-commit hooks:
+   ```bash
+   pre-commit install
+   ```
 
 ## Testing
 
@@ -58,14 +83,6 @@ With coverage report:
 ```bash
 pytest --cov=wifi_radar
 ```
-
-## Coding Standards
-
-- Follow PEP 8 style guide
-- Write docstrings for all functions, classes, and modules
-- Add unit tests for new functionality
-- Keep functions small and focused
-- Use meaningful variable and function names
 
 ## Git Workflow
 

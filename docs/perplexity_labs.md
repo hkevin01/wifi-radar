@@ -37,6 +37,26 @@ For the WiFi-Radar project, Perplexity Labs was instrumental in:
 - **Complexity Management**: Handled the complex signal processing and machine learning aspects without requiring specialist knowledge.
 - **Real-time Feedback**: Provided immediate results and visualizations to guide the development process.
 
+## Best Practices for AI-Assisted Development
+
+When using Perplexity Labs or similar AI-assisted development tools, we recommend the following best practices:
+
+1. **Code Quality Verification**: Always run code quality tools (like our `code_quality.py` script) on AI-generated code to ensure it follows your project's standards.
+
+2. **Batch Processing**: When dealing with large codebases, process files in batches to avoid system limitations like "Argument list too long" errors.
+
+3. **Documentation Review**: Verify that AI-generated docstrings accurately describe function behavior and parameters.
+
+4. **Type Annotations**: Request and verify type annotations in AI-generated code to improve maintainability and catch errors early.
+
+5. **Test Coverage**: Ensure AI-generated code includes appropriate test coverage to validate functionality.
+
+6. **Modular Design**: Structure AI-assisted projects with clear module boundaries to make maintenance easier.
+
+7. **Version Control**: Commit AI-generated code in small, logical chunks rather than large monolithic changes.
+
+8. **Security Review**: Always review AI-generated code for potential security issues, especially in areas handling user input or external data.
+
 ## Accessing Perplexity Labs
 
 Perplexity Labs is available through the Perplexity AI platform at [https://www.perplexity.ai](https://www.perplexity.ai).

@@ -15,6 +15,7 @@ WiFi-Radar uses commodity WiFi routers to capture Channel State Information (CSI
 - Multi-person tracking
 - Through-wall detection
 - Real-time visualization dashboard
+- 3D house visualization with through-wall tracking
 - RTMP streaming for sharing output
 
 ## Requirements
@@ -45,10 +46,13 @@ pip install -e .
 
 ```bash
 # Start the WiFi-Radar system
-python scripts/start_wifi_radar.py
+python main.py
 
 # Run in simulation mode (no hardware required)
-python scripts/start_wifi_radar.py --simulation
+python main.py --simulation
+
+# Run with house visualization
+python main.py --simulation --house-visualization
 
 # View the dashboard
 # Open your browser to http://localhost:8050
@@ -58,6 +62,24 @@ vlc rtmp://localhost/live/wifi_radar
 ```
 
 The dashboard will be available at http://localhost:8050
+
+## Code Quality
+
+We use several tools to maintain code quality:
+
+```bash
+# Install development dependencies
+pip install -r requirements.txt
+
+# Install pre-commit hooks
+pre-commit install
+
+# Run code quality checks
+python scripts/code_quality.py
+
+# Automatically fix code issues
+python scripts/code_quality.py --directory wifi_radar/
+```
 
 ## Project Structure
 
@@ -71,13 +93,27 @@ wifi-radar/
 │   ├── models/           # Neural network models
 │   ├── processing/       # Signal processing
 │   ├── streaming/        # RTMP streaming
-│   └── visualization/    # Dashboard visualization
+│   └── visualization/    # Dashboard & house visualization
 ├── .github/              # GitHub workflows and templates
 ├── .gitignore            # Git ignore rules
 ├── LICENSE               # License file
+├── main.py               # Main entry point
 ├── README.md             # This file
 ├── requirements.txt      # Python dependencies
 └── setup.py              # Package installation
+```
+
+## Visualization
+
+WiFi-Radar offers two main visualization options:
+
+1. **Web Dashboard** - Interactive 3D visualization of pose data and CSI information
+2. **House Visualization** - 3D visualization of a house floor plan showing people through walls
+
+To use the house visualization:
+
+```bash
+python main.py --simulation --house-visualization
 ```
 
 ## Documentation

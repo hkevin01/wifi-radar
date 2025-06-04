@@ -13,3 +13,17 @@ websockets>=10.0
 pyrtmp>=0.1.0
 pywifi>=1.1.12
 dash-bootstrap-components>=1.0.0
+pygame>=2.1.0
+pyyaml>=6.0
+
+# Code quality tools
+black>=22.3.0
+isort>=5.10.1
+pylint>=2.13.9
+flake8>=4.0.1
+mypy>=0.942
+docformatter>=1.5.0
+pydocstyle>=6.1.1
+autoflake>=1.4
+autopep8>=1.6.0
+pre-commit>=2.19.0
