@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# WiFi-Radar — Full stack: Python app + nginx-RTMP server
+#
+# Start:    docker compose -f docker/docker-compose.yml up --build
+# Detached: docker compose -f docker/docker-compose.yml up -d --build
+#
+# Ports exposed to host:
+#   1935  — RTMP ingest   (push from wifi-radar app)
+#   8080  — HLS playback  + nginx stats  (http://localhost:8080/hls/wifi_radar.m3u8)
+#   8050  — Dash dashboard               (http://localhost:8050)
+# ─────────────────────────────────────────────────────────────────────────────
+version: "3.9"
+
+services:
+
+  # ── nginx-rtmp ─────────────────────────────────────────────────────────────
+  nginx-rtmp:
+    image: alfg/nginx-rtmp:latest
+    container_name: wifi-radar-rtmp
+    ports:
+      - "1935:1935"   # RTMP ingest
+      - "8080:8080"   # HLS + HTTP stats
+    volumes:
+      - ./nginx-rtmp.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+
+  # ── wifi-radar app ─────────────────────────────────────────────────────────
+  wifi-radar:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: wifi-radar-app
+    ports:
+      - "8050:8050"   # Dash dashboard
+    environment:
+      - RTMP_URL=rtmp://nginx-rtmp/live/wifi_radar
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - wifi_radar_config:/root/.wifi_radar
+      - wifi_radar_weights:/app/weights
+    depends_on:
+      nginx-rtmp:
+        condition: service_healthy
+    restart: unless-stopped
+    command: >
+      --simulation
+      --rtmp-url rtmp://nginx-rtmp/live/wifi_radar
+      --dashboard-port 8050
+
+volumes:
+  wifi_radar_config:
+    driver: local
+  wifi_radar_weights:
+    driver: local

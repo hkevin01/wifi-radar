@@ -1,5 +1,15 @@
+"""
+ID: WR-VIZ-DASH-001
+Purpose: Real-time Dash dashboard with three tabs:
+         1. Live Monitor   — 3-D pose, CSI signal, detection stats
+         2. Events         — Fall-detection alerts and gait metrics
+         3. Configuration  — Live-editable settings with YAML persistence
+
+Thread-safety: All shared state is protected by self.data_lock.
+"""
 import json
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -9,323 +19,474 @@ import dash
 import dash_bootstrap_components as dbc
 import numpy as np
 import plotly.graph_objects as go
+import yaml
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
 
 
 class Dashboard:
-    """Real-time dashboard for visualizing WiFi-based pose estimation."""
+    """Real-time dashboard for WiFi-based pose estimation."""
 
-    def __init__(self, update_interval_ms: int = 100, max_history: int = 100) -> None:
-        """
-        Initialize the dashboard.
-
-        Args:
-            update_interval_ms: Milliseconds between dashboard updates
-            max_history: Maximum number of historical data points to keep
-        """
+    def __init__(
+        self,
+        update_interval_ms: int = 100,
+        max_history: int = 100,
+        config: Optional[Dict[str, Any]] = None,
+        config_path: Optional[str] = None,
+    ) -> None:
         self.logger = logging.getLogger("Dashboard")
         self.update_interval_ms = update_interval_ms
         self.max_history = max_history
+        self._config = config or {}
+        self._config_path = config_path or os.path.expanduser("~/.wifi_radar/config.yaml")
 
-        # Data storage
-        self.pose_data: Optional[Dict[str, np.ndarray]] = None
+        # ── Live data store ────────────────────────────────────────────────
+        self.pose_data: Optional[Dict] = None
         self.confidence_data: Optional[np.ndarray] = None
         self.csi_data: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self.tracked_people: List[Dict] = []   # list of TrackedPerson-like dicts
         self.data_lock = threading.Lock()
 
-        # History for plots
+        # ── History buffers ────────────────────────────────────────────────
         self.confidence_history = deque(maxlen=max_history)
         self.detected_people_history = deque(maxlen=max_history)
 
-        # Initialize Dash app
+        # ── Events ────────────────────────────────────────────────────────
+        self._fall_events: List[Dict] = []     # max 50 most recent
+        self._gait_metrics: Optional[Dict] = None
+        self._events_lock = threading.Lock()
+
+        # ── Settings change callback ───────────────────────────────────────
+        self._on_config_change = None   # callable(new_config) if set
+
+        # ── Dash app ──────────────────────────────────────────────────────
         self.app = dash.Dash(
-            __name__, external_stylesheets=[dbc.themes.DARKLY], title="WiFi-Radar"
+            __name__,
+            external_stylesheets=[dbc.themes.DARKLY],
+            title="WiFi-Radar",
+            suppress_callback_exceptions=True,
         )
-
-        # Configure layout
         self._setup_layout()
-
-        # Configure callbacks
         self._setup_callbacks()
 
-    def _setup_layout(self):
-        """Set up the dashboard layout."""
+    # ═══════════════════════════════════════════════════════════════════════ #
+    # Layout                                                                  #
+    # ═══════════════════════════════════════════════════════════════════════ #
+
+    def _setup_layout(self) -> None:
         self.app.layout = dbc.Container(
             [
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            [
-                                html.H1(
-                                    "WiFi-Radar: Human Pose Estimation",
-                                    className="text-center text-primary mb-4",
-                                )
-                            ],
-                            width=12,
-                        )
-                    ]
+                dbc.Row([
+                    dbc.Col(html.H2("📡 WiFi-Radar", className="text-primary mb-0"), width="auto"),
+                    dbc.Col(html.Small("Human Pose Estimation via WiFi CSI",
+                                       className="text-muted align-self-center"), width="auto"),
+                ], className="mb-3 mt-2"),
+
+                dcc.Tabs(
+                    id="main-tabs",
+                    value="tab-monitor",
+                    className="mb-3",
+                    children=[
+                        dcc.Tab(label="📊 Live Monitor",  value="tab-monitor"),
+                        dcc.Tab(label="🚨 Events",        value="tab-events"),
+                        dcc.Tab(label="⚙️  Configuration", value="tab-config"),
+                    ],
                 ),
-                dbc.Row(
-                    [
-                        # 3D Pose Visualization
-                        dbc.Col(
-                            [
-                                dbc.Card(
-                                    [
-                                        dbc.CardHeader("Human Pose Visualization"),
-                                        dbc.CardBody(
-                                            [
-                                                dcc.Graph(
-                                                    id="pose-graph",
-                                                    style={"height": "500px"},
-                                                    figure=self._create_empty_pose_figure(),
-                                                )
-                                            ]
-                                        ),
-                                    ]
-                                )
-                            ],
-                            width=8,
-                        ),
-                        # Stats and controls
-                        dbc.Col(
-                            [
-                                dbc.Card(
-                                    [
-                                        dbc.CardHeader("Detection Stats"),
-                                        dbc.CardBody(
-                                            [
-                                                html.Div(
-                                                    [
-                                                        html.H5("People Detected:"),
-                                                        html.H2(
-                                                            id="people-counter",
-                                                            children="0",
-                                                            className="text-center text-success",
-                                                        ),
-                                                    ]
-                                                ),
-                                                html.Hr(),
-                                                html.Div(
-                                                    [
-                                                        html.H5("Confidence:"),
-                                                        dcc.Graph(
-                                                            id="confidence-graph",
-                                                            figure=self._create_empty_confidence_figure(),
-                                                            style={"height": "150px"},
-                                                        ),
-                                                    ]
-                                                ),
-                                                html.Hr(),
-                                                html.Div(
-                                                    [
-                                                        html.H5("System Status:"),
-                                                        html.P(
-                                                            id="system-status",
-                                                            children="Running",
-                                                            className="text-success",
-                                                        ),
-                                                    ]
-                                                ),
-                                            ]
-                                        ),
-                                    ]
-                                ),
-                                html.Br(),
-                                dbc.Card(
-                                    [
-                                        dbc.CardHeader("CSI Data Visualization"),
-                                        dbc.CardBody(
-                                            [
-                                                dcc.Graph(
-                                                    id="csi-graph",
-                                                    figure=self._create_empty_csi_figure(),
-                                                    style={"height": "200px"},
-                                                )
-                                            ]
-                                        ),
-                                    ]
-                                ),
-                            ],
-                            width=4,
-                        ),
-                    ]
-                ),
-                dcc.Interval(
-                    id="interval-component",
-                    interval=self.update_interval_ms,
-                    n_intervals=0,
-                ),
+
+                html.Div(id="tab-content"),
+
+                # Shared intervals
+                dcc.Interval(id="fast-interval",  interval=self.update_interval_ms, n_intervals=0),
+                dcc.Interval(id="slow-interval",  interval=2000,                    n_intervals=0),
+
+                # Config save feedback store
+                dcc.Store(id="config-save-result", data=""),
             ],
             fluid=True,
         )
 
-    def _setup_callbacks(self):
-        """Set up the dashboard callbacks."""
+    # ── Tab content builders ─────────────────────────────────────────────── #
 
+    def _monitor_tab(self) -> html.Div:
+        return html.Div([
+            dbc.Row([
+                # 3-D pose graph
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("Human Pose (3-D)"),
+                        dbc.CardBody(dcc.Graph(
+                            id="pose-graph",
+                            style={"height": "500px"},
+                            figure=self._empty_pose_fig(),
+                        )),
+                    ])
+                ], width=8),
+
+                # Stats sidebar
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("Detection Stats"),
+                        dbc.CardBody([
+                            html.H6("People Detected"),
+                            html.H3(id="people-counter", children="0", className="text-success text-center"),
+                            html.Hr(),
+                            html.H6("Avg Confidence"),
+                            dcc.Graph(
+                                id="confidence-graph",
+                                figure=self._empty_confidence_fig(),
+                                style={"height": "150px"},
+                            ),
+                            html.Hr(),
+                            html.H6("System Status"),
+                            html.P(id="system-status", children="Initialising …", className="text-warning"),
+                        ]),
+                    ]),
+                    html.Br(),
+                    dbc.Card([
+                        dbc.CardHeader("CSI Signal (TX0 · RX0)"),
+                        dbc.CardBody(dcc.Graph(
+                            id="csi-graph",
+                            figure=self._empty_csi_fig(),
+                            style={"height": "200px"},
+                        )),
+                    ]),
+                ], width=4),
+            ]),
+        ])
+
+    def _events_tab(self) -> html.Div:
+        return html.Div([
+            dbc.Row([
+                # Fall events
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("🚨 Fall Detection Alerts"),
+                        dbc.CardBody(
+                            html.Div(id="fall-events-list",
+                                     children=[html.P("No events yet.", className="text-muted")]),
+                        ),
+                    ]),
+                ], width=6),
+
+                # Gait metrics
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("🚶 Gait Analysis"),
+                        dbc.CardBody(html.Div(id="gait-metrics-panel",
+                                              children=[html.P("Collecting data …", className="text-muted")])),
+                    ]),
+                ], width=6),
+            ]),
+        ])
+
+    def _config_tab(self) -> html.Div:
+        cfg = self._config
+        router  = cfg.get("router", {})
+        system  = cfg.get("system", {})
+        dash_c  = cfg.get("dashboard", {})
+        stream  = cfg.get("streaming", {})
+        fall_c  = cfg.get("fall_detection", {})
+
+        return html.Div([
+            dbc.Row([
+                dbc.Col([
+                    # ── Router ──────────────────────────────────────────────
+                    dbc.Card([
+                        dbc.CardHeader("Router / Source"),
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col(dbc.Label("Router IP")),
+                                dbc.Col(dbc.Input(id="cfg-router-ip",   value=router.get("ip", "192.168.1.1"), type="text")),
+                            ], className="mb-2"),
+                            dbc.Row([
+                                dbc.Col(dbc.Label("Router Port")),
+                                dbc.Col(dbc.Input(id="cfg-router-port", value=str(router.get("port", 5500)), type="number")),
+                            ], className="mb-2"),
+                            dbc.Row([
+                                dbc.Col(dbc.Label("Simulation Mode")),
+                                dbc.Col(dbc.Switch(id="cfg-simulation",
+                                                   value=bool(system.get("simulation_mode", True)))),
+                            ], className="mb-2"),
+                        ]),
+                    ], className="mb-3"),
+
+                    # ── Detection ───────────────────────────────────────────
+                    dbc.Card([
+                        dbc.CardHeader("Detection Settings"),
+                        dbc.CardBody([
+                            dbc.Label(id="cfg-conf-label",
+                                      children=f"Confidence Threshold: {system.get('confidence_threshold', 0.30):.2f}"),
+                            dcc.Slider(
+                                id="cfg-conf-threshold",
+                                min=0.1, max=0.9, step=0.05,
+                                value=system.get("confidence_threshold", 0.30),
+                                marks={v: f"{v:.1f}" for v in [0.1, 0.3, 0.5, 0.7, 0.9]},
+                            ),
+                            html.Br(),
+                            dbc.Row([
+                                dbc.Col(dbc.Label("Max People to Track")),
+                                dbc.Col(dbc.Input(id="cfg-max-people",
+                                                  value=str(system.get("max_people", 4)),
+                                                  type="number", min=1, max=8)),
+                            ], className="mb-2"),
+                        ]),
+                    ], className="mb-3"),
+                ], width=6),
+
+                dbc.Col([
+                    # ── Streaming ───────────────────────────────────────────
+                    dbc.Card([
+                        dbc.CardHeader("RTMP Streaming"),
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col(dbc.Label("RTMP URL")),
+                                dbc.Col(dbc.Input(id="cfg-rtmp-url",
+                                                  value=stream.get("rtmp_url", "rtmp://localhost/live/wifi_radar"),
+                                                  type="text")),
+                            ], className="mb-2"),
+                            dbc.Row([
+                                dbc.Col(dbc.Label("Stream FPS")),
+                                dbc.Col(dbc.Input(id="cfg-stream-fps",
+                                                  value=str(stream.get("fps", 30)),
+                                                  type="number", min=5, max=60)),
+                            ], className="mb-2"),
+                        ]),
+                    ], className="mb-3"),
+
+                    # ── Fall Detection ──────────────────────────────────────
+                    dbc.Card([
+                        dbc.CardHeader("Fall Detection"),
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col(dbc.Label("Enable")),
+                                dbc.Col(dbc.Switch(id="cfg-fall-enabled",
+                                                   value=bool(fall_c.get("enabled", True)))),
+                            ], className="mb-2"),
+                            dbc.Label(id="cfg-vel-label",
+                                      children=f"Velocity Threshold: {fall_c.get('velocity_threshold', -0.20):.2f}"),
+                            dcc.Slider(
+                                id="cfg-fall-velocity",
+                                min=-0.8, max=-0.05, step=0.05,
+                                value=fall_c.get("velocity_threshold", -0.20),
+                                marks={v: f"{v:.2f}" for v in [-0.8, -0.5, -0.2, -0.05]},
+                            ),
+                            html.Br(),
+                            dbc.Label(id="cfg-angle-label",
+                                      children=f"Angle Threshold: {fall_c.get('angle_threshold_deg', 40.0):.0f}°"),
+                            dcc.Slider(
+                                id="cfg-fall-angle",
+                                min=20, max=80, step=5,
+                                value=fall_c.get("angle_threshold_deg", 40.0),
+                                marks={v: f"{v}°" for v in [20, 40, 60, 80]},
+                            ),
+                        ]),
+                    ], className="mb-3"),
+
+                    # ── Save button ─────────────────────────────────────────
+                    dbc.Button("💾 Save Configuration", id="cfg-save-btn",
+                               color="success", className="w-100"),
+                    html.Div(id="cfg-save-feedback", className="mt-2 text-center"),
+
+                    html.Small(
+                        "⚠️  Changes to Router IP / Simulation require restart.",
+                        className="text-muted d-block mt-2",
+                    ),
+                ], width=6),
+            ]),
+        ])
+
+    # ═══════════════════════════════════════════════════════════════════════ #
+    # Callbacks                                                               #
+    # ═══════════════════════════════════════════════════════════════════════ #
+
+    def _setup_callbacks(self) -> None:
+
+        # ── Tab routing ──────────────────────────────────────────────────── #
+        @self.app.callback(
+            Output("tab-content", "children"),
+            Input("main-tabs", "value"),
+        )
+        def render_tab(tab):
+            if tab == "tab-monitor":
+                return self._monitor_tab()
+            if tab == "tab-events":
+                return self._events_tab()
+            return self._config_tab()
+
+        # ── Live monitor fast update ─────────────────────────────────────── #
         @self.app.callback(
             [
-                Output("pose-graph", "figure"),
+                Output("pose-graph",       "figure"),
                 Output("confidence-graph", "figure"),
-                Output("csi-graph", "figure"),
-                Output("people-counter", "children"),
-                Output("system-status", "children"),
-                Output("system-status", "className"),
+                Output("csi-graph",        "figure"),
+                Output("people-counter",   "children"),
+                Output("system-status",    "children"),
+                Output("system-status",    "className"),
             ],
-            [Input("interval-component", "n_intervals")],
+            Input("fast-interval", "n_intervals"),
         )
-        def update_graphs(n_intervals):
-            # Acquire lock to prevent data race
+        def update_monitor(n):
             with self.data_lock:
-                pose_data = self.pose_data
-                confidence_data = self.confidence_data
-                csi_data = self.csi_data
+                pose     = self.pose_data
+                conf     = self.confidence_data
+                csi      = self.csi_data
+                n_people = len(self.tracked_people) or (1 if pose is not None else 0)
 
-            # Update pose visualization
-            pose_fig = self._update_pose_figure(pose_data)
+            pose_fig = self._update_pose_figure(pose)
 
-            # Update confidence history and graph
-            if confidence_data is not None:
-                avg_confidence = np.nanmean(confidence_data)
-                self.confidence_history.append(avg_confidence)
-                people_detected = 1 if pose_data is not None else 0
-                self.detected_people_history.append(people_detected)
+            if conf is not None:
+                self.confidence_history.append(float(np.nanmean(conf)))
+            self.detected_people_history.append(n_people)
 
-            confidence_fig = self._update_confidence_figure()
+            conf_fig = self._update_confidence_figure()
+            csi_fig  = self._update_csi_figure(csi)
 
-            # Update CSI visualization
-            csi_fig = self._update_csi_figure(csi_data)
+            if pose is None and n > 10:
+                status, cls = "No Data", "text-warning"
+            else:
+                status, cls = "Running", "text-success"
 
-            # Count people
-            people_count = "0"
-            if pose_data is not None:
-                people_count = "1"  # Simplified - actual implementation would count multiple people
+            return pose_fig, conf_fig, csi_fig, str(n_people), status, cls
 
-            # System status
-            system_status = "Running"
-            status_class = "text-success"
-            if pose_data is None and n_intervals > 10:
-                system_status = "No Data"
-                status_class = "text-warning"
-
-            return (
-                pose_fig,
-                confidence_fig,
-                csi_fig,
-                people_count,
-                system_status,
-                status_class,
-            )
-
-    def _create_empty_pose_figure(self):
-        """Create an empty 3D pose visualization figure."""
-        fig = go.Figure(
-            data=[
-                go.Scatter3d(
-                    x=[],
-                    y=[],
-                    z=[],
-                    mode="markers",
-                    marker=dict(size=0, color="blue", opacity=0),
-                )
-            ]
+        # ── Events slow update ───────────────────────────────────────────── #
+        @self.app.callback(
+            [
+                Output("fall-events-list",  "children"),
+                Output("gait-metrics-panel","children"),
+            ],
+            Input("slow-interval", "n_intervals"),
         )
+        def update_events(n):
+            with self._events_lock:
+                events  = list(self._fall_events)
+                metrics = self._gait_metrics
 
-        fig.update_layout(
-            scene=dict(
-                xaxis=dict(range=[-1, 1], title="X"),
-                yaxis=dict(range=[-1, 1], title="Y"),
-                zaxis=dict(range=[-1, 1], title="Z"),
-                aspectmode="cube",
-            ),
-            margin=dict(l=0, r=0, b=0, t=30),
-            scene_camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
-            title="No Pose Data",
-        )
-
-        return fig
-
-    def _update_pose_figure(self, pose_data):
-        """Update the 3D pose visualization with new data."""
-        if pose_data is None:
-            return self._create_empty_pose_figure()
-
-        # Convert keypoints to coordinates
-        keypoints = pose_data["keypoints"]
-        confidence = pose_data["confidence"]
-
-        # Filter low-confidence keypoints
-        threshold = 0.3
-        valid_mask = confidence > threshold
-
-        # Get coordinates
-        x = keypoints[:, 0]
-        y = keypoints[:, 1]
-        z = keypoints[:, 2]
-
-        # Set invalid keypoints to NaN
-        x[~valid_mask] = np.nan
-        y[~valid_mask] = np.nan
-        z[~valid_mask] = np.nan
-
-        # Define human skeleton connections
-        # This is a simplified skeleton - actual implementation would have more connections
-        edges = [
-            (0, 1),
-            (1, 2),
-            (2, 3),  # Right leg
-            (0, 4),
-            (4, 5),
-            (5, 6),  # Left leg
-            (0, 7),  # Spine
-            (7, 8),
-            (8, 9),  # Neck and head
-            (7, 10),
-            (10, 11),
-            (11, 12),  # Right arm
-            (7, 13),
-            (13, 14),
-            (14, 15),  # Left arm
-        ]
-
-        # Create figure
-        fig = go.Figure()
-
-        # Add keypoints
-        fig.add_trace(
-            go.Scatter3d(
-                x=x,
-                y=y,
-                z=z,
-                mode="markers",
-                marker=dict(
-                    size=6,
-                    color=confidence,
-                    colorscale="Viridis",
-                    opacity=0.8,
-                    colorbar=dict(title="Confidence"),
-                ),
-                text=[f"Keypoint {i}: {conf:.2f}" for i, conf in enumerate(confidence)],
-                hoverinfo="text",
-            )
-        )
-
-        # Add skeleton lines
-        for edge in edges:
-            if valid_mask[edge[0]] and valid_mask[edge[1]]:
-                fig.add_trace(
-                    go.Scatter3d(
-                        x=[x[edge[0]], x[edge[1]]],
-                        y=[y[edge[0]], y[edge[1]]],
-                        z=[z[edge[0]], z[edge[1]]],
-                        mode="lines",
-                        line=dict(color="rgba(50, 50, 200, 0.7)", width=3),
-                        hoverinfo="none",
+            # ── Fall events list ──────────────────────────────────────────
+            if not events:
+                fall_ui = [html.P("No events yet.", className="text-muted")]
+            else:
+                severity_colors = {1: "warning", 2: "danger", 3: "danger"}
+                fall_ui = []
+                for ev in reversed(events[-20:]):
+                    ts_str = time.strftime("%H:%M:%S", time.localtime(ev["timestamp"]))
+                    color  = severity_colors.get(ev["severity"], "secondary")
+                    fall_ui.append(
+                        dbc.Alert(
+                            [
+                                html.Strong(f"[{ts_str}] Person {ev['person_id']}  —  {ev['message']}"),
+                                html.Br(),
+                                html.Small(f"Body angle: {ev['body_angle_deg']:.1f}°"),
+                            ],
+                            color=color,
+                            className="mb-1 py-2",
+                        )
                     )
-                )
 
-        # Update layout
+            # ── Gait metrics ──────────────────────────────────────────────
+            if metrics is None:
+                gait_ui = [html.P("Collecting data …", className="text-muted")]
+            else:
+                gait_ui = [
+                    dbc.Table([
+                        html.Thead(html.Tr([html.Th("Metric"), html.Th("Value")])),
+                        html.Tbody([
+                            html.Tr([html.Td("Cadence"),         html.Td(f"{metrics['cadence_spm']:.1f} steps/min")]),
+                            html.Tr([html.Td("Stride Length"),   html.Td(f"{metrics['stride_length']:.3f} (norm.)")]),
+                            html.Tr([html.Td("Step Symmetry"),   html.Td(f"{metrics['step_symmetry']:.2f}")]),
+                            html.Tr([html.Td("Est. Speed"),      html.Td(f"{metrics['speed_est']:.3f} units/s")]),
+                            html.Tr([html.Td("Steps in window"), html.Td(str(metrics["num_steps"]))]),
+                            html.Tr([html.Td("Window"),          html.Td(f"{metrics['window_s']:.1f} s")]),
+                        ]),
+                    ], bordered=True, hover=True, size="sm", dark=True),
+                ]
+
+            return fall_ui, gait_ui
+
+        # ── Config slider live labels ────────────────────────────────────── #
+        @self.app.callback(
+            Output("cfg-conf-label",  "children"),
+            Input("cfg-conf-threshold", "value"),
+        )
+        def update_conf_label(v):
+            return f"Confidence Threshold: {v:.2f}" if v is not None else "Confidence Threshold"
+
+        @self.app.callback(
+            Output("cfg-vel-label", "children"),
+            Input("cfg-fall-velocity", "value"),
+        )
+        def update_vel_label(v):
+            return f"Velocity Threshold: {v:.2f}" if v is not None else "Velocity Threshold"
+
+        @self.app.callback(
+            Output("cfg-angle-label", "children"),
+            Input("cfg-fall-angle", "value"),
+        )
+        def update_angle_label(v):
+            return f"Angle Threshold: {int(v)}°" if v is not None else "Angle Threshold"
+
+        # ── Save config ──────────────────────────────────────────────────── #
+        @self.app.callback(
+            Output("cfg-save-feedback", "children"),
+            Input("cfg-save-btn", "n_clicks"),
+            [
+                State("cfg-router-ip",      "value"),
+                State("cfg-router-port",    "value"),
+                State("cfg-simulation",     "value"),
+                State("cfg-conf-threshold", "value"),
+                State("cfg-max-people",     "value"),
+                State("cfg-rtmp-url",       "value"),
+                State("cfg-stream-fps",     "value"),
+                State("cfg-fall-enabled",   "value"),
+                State("cfg-fall-velocity",  "value"),
+                State("cfg-fall-angle",     "value"),
+            ],
+            prevent_initial_call=True,
+        )
+        def save_config(n_clicks, router_ip, router_port, simulation,
+                        conf_thr, max_people, rtmp_url, stream_fps,
+                        fall_enabled, fall_vel, fall_angle):
+            if not n_clicks:
+                return ""
+            try:
+                new_config: Dict[str, Any] = {
+                    "router": {
+                        "ip":   str(router_ip or "192.168.1.1"),
+                        "port": int(router_port or 5500),
+                    },
+                    "system": {
+                        "simulation_mode":       bool(simulation),
+                        "confidence_threshold":  float(conf_thr or 0.3),
+                        "max_people":            int(max_people or 4),
+                    },
+                    "streaming": {
+                        "rtmp_url": str(rtmp_url or ""),
+                        "fps":      int(stream_fps or 30),
+                    },
+                    "fall_detection": {
+                        "enabled":             bool(fall_enabled),
+                        "velocity_threshold":  float(fall_vel or -0.2),
+                        "angle_threshold_deg": float(fall_angle or 40.0),
+                    },
+                }
+                os.makedirs(os.path.dirname(self._config_path), exist_ok=True)
+                with open(self._config_path, "w") as fh:
+                    yaml.safe_dump(new_config, fh, default_flow_style=False)
+
+                self._config.update(new_config)
+                if self._on_config_change:
+                    self._on_config_change(new_config)
+
+                return dbc.Alert("✅ Configuration saved.", color="success", duration=3000)
+            except Exception as exc:
+                return dbc.Alert(f"❌ Save failed: {exc}", color="danger")
+
+    # ═══════════════════════════════════════════════════════════════════════ #
+    # Figure builders                                                         #
+    # ═══════════════════════════════════════════════════════════════════════ #
+
+    def _empty_pose_fig(self) -> go.Figure:
+        fig = go.Figure(go.Scatter3d(x=[], y=[], z=[], mode="markers",
+                                     marker=dict(size=0, opacity=0)))
         fig.update_layout(
             scene=dict(
                 xaxis=dict(range=[-1, 1], title="X"),
@@ -334,155 +495,162 @@ class Dashboard:
                 aspectmode="cube",
             ),
             margin=dict(l=0, r=0, b=0, t=30),
-            scene_camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)),
-            title="Human Pose Estimation",
+            title="Waiting for data …",
+            paper_bgcolor="#222",
+            plot_bgcolor="#222",
         )
-
         return fig
 
-    def _create_empty_confidence_figure(self):
-        """Create an empty confidence history figure."""
-        fig = go.Figure()
+    def _update_pose_figure(self, pose_data: Optional[Dict]) -> go.Figure:
+        if pose_data is None:
+            return self._empty_pose_fig()
 
+        kp   = pose_data["keypoints"]
+        conf = pose_data["confidence"]
+        mask = conf > 0.3
+        x, y, z = kp[:, 0].copy(), kp[:, 1].copy(), kp[:, 2].copy()
+        x[~mask] = np.nan
+        y[~mask] = np.nan
+        z[~mask] = np.nan
+
+        edges = [(0,1),(1,2),(2,3),(0,4),(4,5),(5,6),(0,7),(7,8),(8,9),
+                 (7,10),(10,11),(11,12),(7,13),(13,14),(14,15)]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter3d(
+            x=x, y=y, z=z, mode="markers",
+            marker=dict(size=6, color=conf, colorscale="Viridis",
+                        opacity=0.85, cmin=0, cmax=1),
+            text=[f"KP{i}: {c:.2f}" for i, c in enumerate(conf)],
+            hoverinfo="text",
+        ))
+        for i, j in edges:
+            if mask[i] and mask[j]:
+                fig.add_trace(go.Scatter3d(
+                    x=[x[i], x[j]], y=[y[i], y[j]], z=[z[i], z[j]],
+                    mode="lines",
+                    line=dict(color="rgba(100,180,255,0.7)", width=3),
+                    hoverinfo="none",
+                ))
         fig.update_layout(
-            xaxis=dict(title="Time"),
+            scene=dict(
+                xaxis=dict(range=[-1, 1], title="X"),
+                yaxis=dict(range=[-1, 1], title="Y"),
+                zaxis=dict(range=[-1, 1], title="Z"),
+                aspectmode="cube",
+            ),
+            margin=dict(l=0, r=0, b=0, t=30),
+            showlegend=False,
+            paper_bgcolor="#222",
+        )
+        return fig
+
+    def _empty_confidence_fig(self) -> go.Figure:
+        fig = go.Figure()
+        fig.update_layout(
+            xaxis=dict(title="Time", showticklabels=False),
             yaxis=dict(title="Confidence", range=[0, 1]),
             margin=dict(l=10, r=10, t=10, b=10),
             height=150,
-            showlegend=False,
+            paper_bgcolor="#333",
+            plot_bgcolor="#333",
+            font=dict(color="#ccc"),
         )
-
         return fig
 
-    def _update_confidence_figure(self):
-        """Update the confidence history plot."""
+    def _update_confidence_figure(self) -> go.Figure:
         fig = go.Figure()
-
-        if len(self.confidence_history) > 0:
+        if self.confidence_history:
             x = list(range(len(self.confidence_history)))
-
-            # Confidence line
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=list(self.confidence_history),
-                    mode="lines",
-                    line=dict(color="rgba(0, 200, 100, 0.8)", width=2),
-                    name="Confidence",
-                )
-            )
-
-            # People detected
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=list(self.detected_people_history),
-                    mode="lines",
-                    line=dict(color="rgba(200, 100, 0, 0.6)", width=2, dash="dash"),
-                    name="People",
-                )
-            )
-
+            fig.add_trace(go.Scatter(x=x, y=list(self.confidence_history),
+                                     mode="lines", line=dict(color="rgba(0,200,100,0.8)", width=2),
+                                     name="Confidence"))
+            fig.add_trace(go.Scatter(x=x, y=list(self.detected_people_history),
+                                     mode="lines", line=dict(color="rgba(200,100,0,0.6)", width=2, dash="dash"),
+                                     name="People"))
         fig.update_layout(
-            xaxis=dict(title="Time", showticklabels=False),
-            yaxis=dict(title="Value", range=[0, 1.1]),
+            xaxis=dict(showticklabels=False),
+            yaxis=dict(range=[0, 1.1]),
             margin=dict(l=10, r=10, t=10, b=10),
             height=150,
             showlegend=False,
+            paper_bgcolor="#333",
+            plot_bgcolor="#333",
+            font=dict(color="#ccc"),
         )
-
         return fig
 
-    def _create_empty_csi_figure(self):
-        """Create an empty CSI visualization figure."""
+    def _empty_csi_fig(self) -> go.Figure:
         fig = go.Figure()
-
-        fig.update_layout(
-            xaxis=dict(title="Subcarrier"),
-            yaxis=dict(title="Amplitude"),
-            margin=dict(l=10, r=10, t=10, b=10),
-            height=200,
-            showlegend=False,
-        )
-
+        fig.update_layout(xaxis_title="Subcarrier", yaxis_title="Amplitude",
+                          margin=dict(l=10, r=10, t=10, b=10), height=200,
+                          paper_bgcolor="#333", plot_bgcolor="#333",
+                          font=dict(color="#ccc"))
         return fig
 
-    def _update_csi_figure(self, csi_data):
-        """Update the CSI visualization with new data."""
+    def _update_csi_figure(self, csi_data: Optional[Tuple]) -> go.Figure:
         fig = go.Figure()
-
         if csi_data is not None:
-            amplitude, phase = csi_data
-
-            # For simplicity, just show one TX-RX pair
-            tx_idx, rx_idx = 0, 0
-            amplitude_data = amplitude[tx_idx, rx_idx]
-            phase_data = phase[tx_idx, rx_idx]
-
-            # X-axis is subcarrier index
-            x = np.arange(len(amplitude_data))
-
-            # Amplitude plot
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=amplitude_data,
-                    mode="lines",
-                    line=dict(color="rgba(0, 100, 200, 0.8)", width=2),
-                    name="Amplitude",
-                )
-            )
-
-            # Phase plot (on secondary y-axis)
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=phase_data,
-                    mode="lines",
-                    line=dict(color="rgba(200, 0, 100, 0.6)", width=2),
-                    name="Phase",
-                    yaxis="y2",
-                )
-            )
-
+            amp, phase = csi_data
+            x = np.arange(amp.shape[2])
+            fig.add_trace(go.Scatter(x=x, y=amp[0, 0],
+                                     mode="lines", line=dict(color="rgba(0,100,200,0.8)", width=2),
+                                     name="Amplitude"))
+            fig.add_trace(go.Scatter(x=x, y=phase[0, 0],
+                                     mode="lines", line=dict(color="rgba(200,0,100,0.6)", width=2),
+                                     name="Phase", yaxis="y2"))
         fig.update_layout(
-            xaxis=dict(title="Subcarrier"),
-            yaxis=dict(title="Amplitude"),
-            yaxis2=dict(
-                title="Phase", overlaying="y", side="right", range=[-np.pi, np.pi]
-            ),
+            xaxis_title="Subcarrier",
+            yaxis_title="Amplitude",
+            yaxis2=dict(title="Phase", overlaying="y", side="right",
+                        range=[-np.pi, np.pi]),
             margin=dict(l=10, r=10, t=10, b=10),
             height=200,
             showlegend=True,
             legend=dict(orientation="h", y=1.1),
+            paper_bgcolor="#333",
+            plot_bgcolor="#333",
+            font=dict(color="#ccc"),
         )
-
         return fig
 
-    def update_data(self, pose_data=None, confidence_data=None, csi_data=None):
-        """Update the dashboard with new data.
+    # ═══════════════════════════════════════════════════════════════════════ #
+    # Data ingestion (thread-safe)                                            #
+    # ═══════════════════════════════════════════════════════════════════════ #
 
-        Args:
-            pose_data: Dictionary containing keypoints and confidence
-            confidence_data: Array of confidence values
-            csi_data: Tuple of (amplitude, phase) arrays
-        """
+    def update_data(
+        self,
+        pose_data: Optional[Dict] = None,
+        confidence_data: Optional[np.ndarray] = None,
+        csi_data: Optional[Tuple] = None,
+        tracked_people: Optional[List] = None,
+    ) -> None:
         with self.data_lock:
-            if pose_data is not None:
-                self.pose_data = pose_data
+            if pose_data       is not None: self.pose_data       = pose_data
+            if confidence_data is not None: self.confidence_data = confidence_data
+            if csi_data        is not None: self.csi_data        = csi_data
+            if tracked_people  is not None: self.tracked_people  = tracked_people
 
-            if confidence_data is not None:
-                self.confidence_data = confidence_data
+    def update_events(
+        self,
+        fall_events: Optional[List[Dict]] = None,
+        gait_metrics: Optional[Dict]      = None,
+    ) -> None:
+        with self._events_lock:
+            if fall_events is not None:
+                self._fall_events.extend(fall_events)
+                self._fall_events = self._fall_events[-50:]   # keep last 50
+            if gait_metrics is not None:
+                self._gait_metrics = gait_metrics
 
-            if csi_data is not None:
-                self.csi_data = csi_data
+    def set_config_change_callback(self, fn) -> None:
+        """Register a callable invoked when the user saves config from the UI."""
+        self._on_config_change = fn
 
-    def run(self, debug=False, port=8050):
-        """Run the dashboard server.
+    # ═══════════════════════════════════════════════════════════════════════ #
+    # Start                                                                   #
+    # ═══════════════════════════════════════════════════════════════════════ #
 
-        Args:
-            debug: Enable debug mode for Dash
-            port: Port to run the server on
-        """
-        self.logger.info(f"Starting dashboard on port {port}")
-        self.app.run_server(debug=debug, port=port)
+    def run(self, debug: bool = False, port: int = 8050) -> None:
+        self.logger.info("Starting dashboard on port %d", port)
+        self.app.run(debug=debug, port=port, use_reloader=False)

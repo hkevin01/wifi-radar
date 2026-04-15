@@ -64,8 +64,7 @@ class DualBranchEncoder(nn.Module):
         """
         batch_size = amplitude.shape[0]
 
-        # Reshape inputs to (batch_size, channels, height, width)
-        # Where height=num_tx, width=num_rx*num_subcarriers
+        # Reshape inputs to (batch_size, 1, num_tx, num_rx * num_subcarriers)
         amplitude = amplitude.view(
             batch_size, 1, self.num_tx, self.num_rx * self.num_subcarriers
         )
@@ -73,26 +72,25 @@ class DualBranchEncoder(nn.Module):
             batch_size, 1, self.num_tx, self.num_rx * self.num_subcarriers
         )
 
-        # Amplitude branch
+        # Amplitude branch — no intermediate max-pool (num_tx=3 is too small for 2 pools)
         a = F.relu(self.amplitude_norm1(self.amplitude_conv1(amplitude)))
-        a = F.max_pool2d(a, 2)
         a = F.relu(self.amplitude_norm2(self.amplitude_conv2(a)))
-        a = F.max_pool2d(a, 2)
         a = F.relu(self.amplitude_norm3(self.amplitude_conv3(a)))
 
         # Phase branch
         p = F.relu(self.phase_norm1(self.phase_conv1(phase)))
-        p = F.max_pool2d(p, 2)
         p = F.relu(self.phase_norm2(self.phase_conv2(p)))
-        p = F.max_pool2d(p, 2)
         p = F.relu(self.phase_norm3(self.phase_conv3(p)))
 
         # Fusion
         combined = torch.cat([a, p], dim=1)
         fused = F.relu(self.fusion_norm(self.fusion_conv(combined)))
 
-        # Flatten and pass through fully connected layers
-        flattened = fused.view(batch_size, -1)
+        # Adaptive pooling → fixed (num_tx, num_rx) spatial size regardless of input width
+        pooled = F.adaptive_avg_pool2d(fused, (self.num_tx, self.num_rx))
+
+        # Flatten: (batch, 64 * num_tx * num_rx) == (batch, flattened_size)
+        flattened = pooled.view(batch_size, -1)
         hidden = F.relu(self.fc1(flattened))
         output = self.fc2(hidden)
 

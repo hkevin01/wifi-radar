@@ -12,11 +12,15 @@ from typing import Any, Dict, Optional
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(project_root)
 
+from wifi_radar.analysis.fall_detector import FallDetector, FallSeverity
+from wifi_radar.analysis.gait_analyzer import GaitAnalyzer
 from wifi_radar.data.csi_collector import CSICollector
 from wifi_radar.models.encoder import DualBranchEncoder
+from wifi_radar.models.multi_person_tracker import MultiPersonTracker
 from wifi_radar.models.pose_estimator import PoseEstimator
 from wifi_radar.processing.signal_processor import SignalProcessor
 from wifi_radar.streaming.rtmp_streamer import RTMPStreamer
+from wifi_radar.utils.model_io import load_checkpoint
 from wifi_radar.visualization.dashboard import Dashboard
 from wifi_radar.visualization.house_visualizer import HouseVisualizer  # noqa: F401
 
@@ -65,6 +69,23 @@ def parse_args():
         help="Directory to save recorded data",
     )
     parser.add_argument("--replay", type=str, help="Replay recorded CSI data from file")
+    parser.add_argument(
+        "--weights",
+        type=str,
+        default=None,
+        help="Path to .pth checkpoint (e.g. weights/simulation_baseline.pth)",
+    )
+    parser.add_argument(
+        "--num-people",
+        type=int,
+        default=1,
+        help="Number of simulated people (1-4; simulation mode only)",
+    )
+    parser.add_argument(
+        "--export-onnx",
+        action="store_true",
+        help="Export loaded models to ONNX then exit (requires onnx / onnxruntime)",
+    )
 
     return parser.parse_args()
 
@@ -174,6 +195,17 @@ def main():
         config["streaming"]["rtmp_url"] = args.rtmp_url
     if args.house_visualization:
         config["house_visualization"]["enabled"] = True
+    if args.num_people:
+        config["system"]["num_people"] = args.num_people
+
+    # ── ONNX export shortcut ──────────────────────────────────────────────
+    if args.export_onnx:
+        import subprocess
+        cmd = [sys.executable, "scripts/export_onnx.py"]
+        if args.weights:
+            cmd += ["--weights", args.weights]
+        subprocess.run(cmd, check=True)
+        sys.exit(0)
 
     # Initialize data collection
     logger.info("Initializing CSI data collection")
@@ -187,14 +219,39 @@ def main():
 
     # Initialize neural network models
     logger.info("Initializing neural network models")
-    encoder = DualBranchEncoder()
-    pose_estimator = PoseEstimator()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    encoder        = DualBranchEncoder().to(device)
+    pose_estimator = PoseEstimator().to(device)
+    encoder.initialize_weights()
+
+    weights_path = args.weights or os.path.join("weights", "simulation_baseline.pth")
+    if os.path.exists(weights_path):
+        try:
+            info = load_checkpoint(encoder, pose_estimator, weights_path, device=device)
+            logger.info("Loaded weights: epoch=%d  val_loss=%.4f", info["epoch"], info["val_loss"])
+        except Exception as exc:
+            logger.warning("Could not load weights from %s: %s", weights_path, exc)
+    else:
+        logger.info("No weights file found at %s — using random initialisation", weights_path)
+        logger.info("Run: python scripts/train_simulation_baseline.py  to generate baseline weights.")
+
+    # Multi-person tracker
+    mp_tracker = MultiPersonTracker(
+        max_people=config["system"].get("max_people", 4),
+        existence_threshold=0.0,   # legacy detect_people() doesn't output existence score
+    )
+
+    # Per-person fall detectors and gait analysers (created on demand)
+    fall_detectors: dict = {}
+    gait_analysers: dict  = {}
 
     # Initialize visualization
     logger.info("Initializing visualization")
     dashboard = Dashboard(
         update_interval_ms=config["dashboard"]["update_interval_ms"],
         max_history=config["dashboard"]["max_history"],
+        config=config,
+        config_path=os.path.expanduser("~/.wifi_radar/config.yaml"),
     )
 
     # Initialize RTMP streaming
@@ -221,6 +278,7 @@ def main():
     try:
         # Start data collection
         logger.info("Starting CSI data collection")
+        csi_collector.sim_num_people = config["system"].get("num_people", 1)
         csi_collector.start(simulation_mode=config["system"]["simulation_mode"])
 
         # Start RTMP streaming
@@ -240,76 +298,125 @@ def main():
 
         def processing_thread():
             logger.info("Starting data processing thread")
-
-            # For temporal consistency
             hidden_state = None
+            frame_id = 0
+
+            fall_cfg = config.get("fall_detection", {})
+            fall_enabled = fall_cfg.get("enabled", True)
 
             try:
                 while True:
-                    # Get CSI data
                     csi_data = csi_collector.get_csi_data(block=True, timeout=1.0)
                     if csi_data is None:
                         continue
 
                     amplitude, phase = csi_data
-
-                    # Process signal
                     processed_amplitude, processed_phase = signal_processor.process(
                         amplitude, phase
                     )
 
-                    # Convert to PyTorch tensors
-                    device = torch.device(
-                        "cuda" if torch.cuda.is_available() else "cpu"
-                    )
                     amplitude_tensor = (
-                        torch.from_numpy(processed_amplitude)
-                        .unsqueeze(0)
-                        .float()
-                        .to(device)
+                        torch.from_numpy(processed_amplitude).unsqueeze(0).float().to(device)
                     )
                     phase_tensor = (
-                        torch.from_numpy(processed_phase)
-                        .unsqueeze(0)
-                        .float()
-                        .to(device)
+                        torch.from_numpy(processed_phase).unsqueeze(0).float().to(device)
                     )
 
-                    # Run through neural network
                     with torch.no_grad():
-                        # Encode CSI data
                         encoded_features = encoder(amplitude_tensor, phase_tensor)
-
-                        # Estimate pose
                         keypoints, confidence, hidden_state = pose_estimator(
                             encoded_features, hidden_state
                         )
+                        raw_people = pose_estimator.detect_people(keypoints, confidence)
 
-                        # Detect people
-                        people = pose_estimator.detect_people(keypoints, confidence)
+                    # Multi-person tracking — assigns stable IDs
+                    tracked = mp_tracker.update(raw_people, frame_id=frame_id)
+                    frame_id += 1
 
-                        # Update dashboard and RTMP stream with the first detected person
-                        if people:
-                            first_person = people[0]
+                    # Fall detection + gait analysis per tracked person
+                    new_fall_events = []
+                    ts_now = time.time()
+                    for person in tracked:
+                        pid = person.person_id
 
-                            # Update dashboard
-                            dashboard.update_data(
-                                pose_data=first_person,
-                                confidence_data=first_person["confidence"],
-                                csi_data=(amplitude, phase),
+                        # Lazily create per-person analysers
+                        if pid not in fall_detectors:
+                            fall_detectors[pid] = FallDetector(
+                                person_id=pid,
+                                velocity_threshold=fall_cfg.get("velocity_threshold", -0.20),
+                                angle_threshold_deg=fall_cfg.get("angle_threshold_deg", 40.0),
                             )
+                            gait_analysers[pid] = GaitAnalyzer()
 
-                            # Update RTMP stream
-                            rtmp_streamer.update_frame(
-                                pose_data=first_person,
-                                confidence_data=first_person["confidence"],
+                        if fall_enabled:
+                            ev = fall_detectors[pid].update(
+                                person.keypoints, person.confidence, timestamp=ts_now
                             )
+                            if ev is not None:
+                                new_fall_events.append({
+                                    "person_id":     ev.person_id,
+                                    "timestamp":     ev.timestamp,
+                                    "severity":      int(ev.severity),
+                                    "body_angle_deg": ev.body_angle_deg,
+                                    "message":       ev.message,
+                                })
 
-                            # Update house visualization
-                            if house_visualizer:
-                                house_visualizer.update_people(people)
+                        gait_analysers[pid].update(
+                            person.keypoints, person.confidence, timestamp=ts_now
+                        )
 
-                    # Sleep briefly to prevent CPU overuse
+                    # Collect gait metrics from first active person
+                    gait_metrics_dict = None
+                    if tracked:
+                        gm = gait_analysers[tracked[0].person_id].get_metrics()
+                        if gm is not None:
+                            gait_metrics_dict = {
+                                "cadence_spm":    gm.cadence_spm,
+                                "stride_length":  gm.stride_length,
+                                "step_symmetry":  gm.step_symmetry,
+                                "speed_est":      gm.speed_est,
+                                "num_steps":      gm.num_steps,
+                                "window_s":       gm.window_s,
+                            }
+
+                    # Dashboard updates
+                    first_person_dict = None
+                    first_conf        = None
+                    if tracked:
+                        first_person_dict = {
+                            "keypoints":  tracked[0].keypoints,
+                            "confidence": tracked[0].confidence,
+                        }
+                        first_conf = tracked[0].confidence
+
+                    dashboard.update_data(
+                        pose_data=first_person_dict,
+                        confidence_data=first_conf,
+                        csi_data=(amplitude, phase),
+                        tracked_people=[
+                            {"keypoints": t.keypoints, "confidence": t.confidence,
+                             "person_id": t.person_id}
+                            for t in tracked
+                        ],
+                    )
+
+                    if new_fall_events or gait_metrics_dict:
+                        dashboard.update_events(
+                            fall_events=new_fall_events or None,
+                            gait_metrics=gait_metrics_dict,
+                        )
+
+                    if tracked:
+                        rtmp_streamer.update_frame(
+                            pose_data=first_person_dict,
+                            confidence_data=first_conf,
+                        )
+                        if house_visualizer:
+                            house_visualizer.update_people([
+                                {"keypoints": t.keypoints, "confidence": t.confidence}
+                                for t in tracked
+                            ])
+
                     time.sleep(0.01)
 
             except KeyboardInterrupt:
