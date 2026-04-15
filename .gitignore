@@ -78,6 +78,11 @@ instance/
 *.dat
 *.pkl
 *.npy
+
+# Model weights (large files — generate with scripts/train_simulation_baseline.py)
+weights/*.pth
+weights/*.onnx
+!weights/.gitkeep
 *.npz
 data/raw/
 data/processed/
