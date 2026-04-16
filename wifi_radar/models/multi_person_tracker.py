@@ -288,9 +288,17 @@ class MultiPersonTracker:
 
     @property
     def active_count(self) -> int:
+        """Return the number of currently active (not retired) person tracks."""
         return sum(1 for t in self._tracks.values() if t.active)
 
     def reset(self) -> None:
+        """Clear all tracks and reset the frame and ID counters.
+
+        Side Effects:
+            Empties ``self._tracks``, resets ``self._next_id`` and
+            ``self._frame_idx`` to 0.  Useful for resetting state between
+            recording sessions without destroying the tracker object.
+        """
         self._tracks.clear()
         self._next_id   = 0
         self._frame_idx = 0
@@ -304,7 +312,27 @@ class MultiPersonTracker:
         active_track_ids: List[int],
         detections: List[Dict],
     ) -> Tuple[List[Tuple[int, int]], List[int]]:
-        """Greedily assign detections to tracks by minimum centroid distance."""
+        """Greedily assign detections to existing tracks by minimum centroid distance.
+
+        Algorithm:
+            1. Build an (n_tracks × n_detections) Euclidean distance matrix.
+            2. Repeatedly find the global minimum in the matrix.
+            3. Accept the pair if the distance is ≤ ``self.max_match_dist``.
+            4. Mask out the matched row and column (set to inf) so each track
+               and each detection can only be matched once.
+            5. Collect unmatched detection indices.
+
+        Complexity: O(N²) per call — acceptable for N ≤ 8 people.
+
+        Args:
+            active_track_ids: List of track IDs currently in ``self._tracks``.
+            detections:       List of candidate detection dicts with a
+                              ``centroid`` key (3-D numpy array).
+
+        Returns:
+            Tuple (matched_pairs, unmatched_det_indices) where
+            ``matched_pairs`` is a list of (track_id, det_idx) tuples.
+        """
         tracks   = [(tid, self._tracks[tid].centroid) for tid in active_track_ids]
         n_tracks = len(tracks)
         n_dets   = len(detections)
@@ -339,7 +367,17 @@ class MultiPersonTracker:
 
     @staticmethod
     def _weighted_centroid(kp: np.ndarray, conf: np.ndarray, threshold: float = 0.3) -> np.ndarray:
-        mask = conf > threshold
+        """Compute the confidence-weighted 3-D centroid of valid keypoints.
+
+        Args:
+            kp:        (17, 3) array of normalised keypoint coordinates.
+            conf:      (17,) array of per-keypoint confidence scores.
+            threshold: Minimum confidence to include a keypoint (default 0.3).
+
+        Returns:
+            (3,) float32 centroid array.  Returns the zero vector if no keypoint
+            exceeds the confidence threshold.
+        """
         if not np.any(mask):
             return np.zeros(3, dtype=np.float32)
         w = conf[mask]
@@ -347,6 +385,14 @@ class MultiPersonTracker:
 
     @staticmethod
     def _to_numpy(x: Any) -> np.ndarray:
+        """Convert a PyTorch Tensor or array-like to a float32 numpy array.
+
+        Args:
+            x: ``torch.Tensor`` (detached, moved to CPU) or any array-like.
+
+        Returns:
+            float32 numpy array with the same shape as ``x``.
+        """
         if isinstance(x, torch.Tensor):
             return x.detach().cpu().numpy()
         return np.asarray(x, dtype=np.float32)

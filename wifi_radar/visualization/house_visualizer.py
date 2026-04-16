@@ -1,4 +1,24 @@
-"""House visualizer — optional OpenGL/pygame 3-D view of detected poses."""
+"""
+ID: WR-VIZ-HOUSE-001
+Requirement: Provide an optional real-time 2-D top-down / perspective house view
+             rendered with pygame, overlaying detected person positions on a
+             schematic floor plan.
+Purpose: Gives operators a spatial, room-level overview of where people are
+         located inside the monitored area, complementing the 3-D skeleton view
+         in the Dash dashboard.
+Thread-safety model:
+    ``update_people()`` is the only method intended to be called from the
+    processing thread.  All shared state (``self._people``) is protected by
+    ``self._lock`` (threading.Lock).  The render loop reads ``self._people``
+    under the same lock, ensuring no partial writes are visible.
+Assumptions:
+    - pygame must be installed; if not, the visualiser degrades gracefully and
+      all public methods become no-ops.
+    - A display server (X11, Wayland, or headless framebuffer) must be available.
+Failure Modes:
+    Any pygame or OpenGL exception in ``_render_loop()`` is caught, logged, and
+    causes the loop to exit cleanly without crashing the main process.
+"""
 from __future__ import annotations
 
 import logging
@@ -48,7 +68,23 @@ class HouseVisualizer:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the visualizer in a background thread."""
+        """Start the pygame render loop in a background daemon thread.
+
+        Preconditions:
+            ``self._pygame_available`` must be True (pygame installed and importable).
+            Must not be called while already running.
+
+        Side Effects:
+            Sets ``self._running = True``.
+            Spawns ``self._thread`` as a daemon thread targeting ``_render_loop()``.
+            The daemon flag ensures the thread is killed automatically if the main
+            process exits before ``stop()`` is called.
+
+        Thread Safety:
+            Only call from the main thread before starting the processing thread.
+            ``_running`` is a plain bool; no lock is used because ``start()`` and
+            ``stop()`` are only called from the main thread.
+        """
         if not self._pygame_available:
             return
         if self._running:
@@ -59,14 +95,35 @@ class HouseVisualizer:
         self.logger.info("HouseVisualizer started (%dx%d @ %d fps)", self.width, self.height, self.fps)
 
     def stop(self) -> None:
-        """Stop the visualizer."""
+        """Signal the render loop to exit and wait for the thread to join.
+
+        Side Effects:
+            Sets ``self._running = False``.
+            Joins ``self._thread`` with a 2-second timeout so the caller is not
+            blocked indefinitely if pygame hangs on ``pygame.quit()``.
+        """
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
         self.logger.info("HouseVisualizer stopped")
 
     def update_people(self, people: List[dict]) -> None:
-        """Thread-safe update of detected people for the next render frame."""
+        """Thread-safe replacement of the detected-people list for the next frame.
+
+        Called by the inference/processing thread after each forward pass.
+        Acquires ``self._lock`` before overwriting ``self._people`` so the
+        render thread never sees a partially-updated list.
+
+        Args:
+            people: List of person dicts, each containing at minimum:
+                      ``keypoints``  — (17, 3) numpy array of normalised 3-D coords.
+                      ``confidence`` — (17,) numpy array of per-keypoint scores.
+
+        Thread Safety:
+            This method is the ONLY external entry point that mutates
+            ``self._people``.  The render loop reads the same field under the
+            same lock, guaranteeing mutual exclusion.
+        """
         with self._lock:
             self._people = list(people)
 
@@ -75,7 +132,27 @@ class HouseVisualizer:
     # ------------------------------------------------------------------
 
     def _render_loop(self) -> None:
-        """Main rendering loop.  Replace with a real pygame render loop."""
+        """Pygame event-and-render loop running in the background daemon thread.
+
+        Loop structure (each iteration at ``self.fps``):
+            1. Drain the pygame event queue; exit on QUIT event.
+            2. Fill the screen with the background colour.
+            3. Acquire ``self._lock`` and call ``_draw_people()`` to render
+               the current snapshot without holding the lock during the full
+               draw cycle (only the list copy is protected).
+            4. Flip the display buffer.
+            5. ``clock.tick(fps)`` caps the frame rate and yields CPU time.
+
+        Side Effects:
+            Calls ``pygame.init()`` and ``pygame.quit()`` (in finally block)
+            inside the thread.  Any exception is caught and logged; pygame is
+            always quit to release the display resource.
+
+        Note:
+            Replace the body of this method with a full room-geometry render
+            (floor plan walls, router antenna positions, etc.) once the spatial
+            layout model is available.
+        """
         import time
         import pygame
 
@@ -103,7 +180,25 @@ class HouseVisualizer:
             pygame.quit()
 
     def _draw_people(self, screen) -> None:  # type: ignore[no-untyped-def]
-        """Draw detected people onto *screen*.  Extend as needed."""
+        """Render each detected person as a circle at their projected 2-D position.
+
+        Algorithm:
+            For each person in ``self._people``:
+            1. Skip entries without ``keypoints`` or ``confidence``.
+            2. Select keypoints whose confidence exceeds 0.3 (valid mask).
+            3. Compute the mean X and Y of valid keypoints as the person's
+               centre of mass in normalised space [-1, 1].
+            4. Map the normalised centre of mass to screen pixels:
+               ``pixel = (norm + 1) / 2 \u00d7 dimension``.
+            5. Draw a filled circle at the screen position.
+
+        Thread Safety:
+            Must be called from inside the ``with self._lock`` block in
+            ``_render_loop()`` to ensure a consistent view of ``self._people``.
+
+        Args:
+            screen: Active ``pygame.Surface`` (the display window).
+        """
         import pygame
 
         for person in self._people:

@@ -198,10 +198,40 @@ class SimulatedPoseDataset(Dataset):
 # ─────────────────────────────────────────────────────────────────────────── #
 
 def train(args: argparse.Namespace) -> None:
+    """Run the full training pipeline: dataset generation → training → validation → checkpoint.
+
+    Phases:
+        1. Dataset generation — creates an in-memory ``SimulatedPoseDataset``;
+           80 % training split, 10 % validation split.
+        2. Model initialisation — constructs ``DualBranchEncoder`` and
+           ``PoseEstimator``; optionally resumes from a checkpoint.
+        3. Optimiser + scheduler setup — Adam with weight decay 1e-5 and a
+           cosine-annealing LR schedule decaying to 1 % of the initial LR.
+        4. Epoch loop:
+             a. Training pass — forward, compute loss, backward, gradient clip,
+                step optimiser.
+             b. Validation pass — forward only (torch.no_grad()), accumulate loss.
+             c. Checkpoint — save if ``val_loss`` improved.
+        5. Completion summary — logs the best validation loss and output path.
+
+    Loss function:
+        ``total = MSE(kp_pred, kp_gt) + 0.1 × BCE(conf_pred, conf_gt)``
+        The 0.1 weight keeps the confidence loss term an order of magnitude
+        smaller than the keypoint regression loss during early training.
+
+    Args:
+        args: Parsed argument namespace from ``parse_args()``.
+
+    Side Effects:
+        Creates ``args.output_dir`` if it does not exist.
+        Writes / overwrites ``weights/simulation_baseline.pth`` when val_loss improves.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Device: %s", device)
 
-    # ── Dataset ───────────────────────────────────────────────────────────
+    # ── Phase 1: Dataset generation ───────────────────────────────────────
+    # SimulatedPoseDataset is generated entirely in memory; no disk I/O required.
+    # The 90/10 train/val split uses a seeded Generator for reproducibility.
     log.info("Generating %d simulation samples …", args.n_samples)
     t0 = time.time()
     dataset = SimulatedPoseDataset(n_samples=args.n_samples, seed=args.seed)
@@ -215,7 +245,9 @@ def train(args: argparse.Namespace) -> None:
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=0, pin_memory=(device.type == "cuda"))
     val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    # ── Models ────────────────────────────────────────────────────────────
+    # ── Phase 2: Model initialisation ────────────────────────────────────
+    # Kaiming initialisation is applied before optional checkpoint loading so
+    # that resumed training starts from the checkpoint weights, not random ones.
     encoder        = DualBranchEncoder().to(device)
     pose_estimator = PoseEstimator().to(device)
     encoder.initialize_weights()
@@ -235,13 +267,16 @@ def train(args: argparse.Namespace) -> None:
         optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
     )
     if start_epoch > 0:
+        # Advance the scheduler to the correct state when resuming mid-training.
         for _ in range(start_epoch):
             scheduler.step()
 
     os.makedirs(args.output_dir, exist_ok=True)
     output_path = os.path.join(args.output_dir, "simulation_baseline.pth")
 
-    # ── Epoch loop ────────────────────────────────────────────────────────
+    # ── Phase 4: Epoch loop ───────────────────────────────────────────────
+    # Each epoch consists of a training pass, a validation pass, and a
+    # conditional checkpoint save (best val_loss wins).
     for epoch in range(start_epoch, args.epochs):
         encoder.train()
         pose_estimator.train()
@@ -255,20 +290,27 @@ def train(args: argparse.Namespace) -> None:
             features               = encoder(amp, pha)
             kp_pred, conf_pred, _  = pose_estimator(features)
 
+            # Loss: keypoint MSE + 0.1 × confidence BCE.
+            # The 0.1 weight prevents the confidence term from dominating early
+            # when keypoint regression gradients are large.
             loss_kp   = F.mse_loss(kp_pred, kp_gt)
             loss_conf = F.binary_cross_entropy(conf_pred, conf_gt)
             loss      = loss_kp + 0.1 * loss_conf
 
             optimizer.zero_grad()
             loss.backward()
+            # Gradient clipping prevents exploding gradients in the LSTM backbone.
             torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
             optimizer.step()
             train_loss += loss.item()
 
+        # Step LR after each epoch (cosine annealing; must follow optimizer.step()).
         scheduler.step()
         train_loss /= len(train_dl)
 
-        # ── Validation ────────────────────────────────────────────────────
+        # ── Phase 4b: Validation pass ─────────────────────────────────────
+        # torch.no_grad() disables autograd to halve memory usage and speed up
+        # the validation forward pass (no gradients needed).
         encoder.eval()
         pose_estimator.eval()
         val_loss = 0.0
@@ -305,11 +347,26 @@ def train(args: argparse.Namespace) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-# CLI                                                                          #
+# Phase 3 (setup): Optimiser and LR scheduler                                 #
+# (Defined inline above; this comment marks the conceptual boundary for        #
+#  future extraction into a separate configure_training() helper.)             #
 # ─────────────────────────────────────────────────────────────────────────── #
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train WiFi-Radar simulation baseline")
+    """Parse CLI arguments for the simulation-baseline training script.
+
+    Args defined:
+        --epochs     Number of full passes through the training dataset.
+        --n-samples  Total number of synthetic CSI/pose pairs to generate.
+        --batch-size Mini-batch size for the DataLoader.
+        --lr         Initial learning rate for the Adam optimiser.
+        --seed       RNG seed for dataset generation and train/val split.
+        --output-dir Directory where checkpoints are written.
+        --resume     Path to an existing checkpoint to continue training from.
+
+    Returns:
+        Parsed ``argparse.Namespace``.
+    """
     p.add_argument("--epochs",     type=int,   default=80,      help="Training epochs")
     p.add_argument("--n-samples",  type=int,   default=8000,    help="Synthetic dataset size")
     p.add_argument("--batch-size", type=int,   default=64,      help="Mini-batch size")

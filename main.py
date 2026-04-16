@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-
+"""
+ID: WR-MAIN-001
+Requirement: Orchestrate all WiFi-Radar subsystems (CSI collection, signal
+             processing, neural-network inference, multi-person tracking,
+             fall detection, gait analysis, visualisation, and RTMP streaming)
+             into a single runnable application process.
+Purpose: Entry point for both interactive use and automated deployment.
+         Parses CLI arguments, loads configuration, initialises every module,
+         starts background threads, then blocks on the Dash web dashboard.
+Architecture:
+    main()
+      ├─ parse_args()          — argparse CLI interface
+      ├─ setup_logging()       — file + console handlers
+      ├─ load_config()         — YAML config with CLI overrides
+      ├─ CSICollector.start()  — daemon thread producing CSI frames
+      ├─ RTMPStreamer.start()  — daemon thread pushing H.264 to RTMP
+      ├─ HouseVisualizer.start() (optional)
+      ├─ processing_thread()   — daemon thread: process → infer → track → alert
+      └─ Dashboard.run()       — Dash server (blocking, main thread)
+References: See docs/system_overview.md for the full pipeline diagram.
+"""
 import argparse
 import logging
 import os
@@ -26,7 +46,27 @@ from wifi_radar.visualization.house_visualizer import HouseVisualizer  # noqa: F
 
 
 def parse_args():
-    """Parse command line arguments."""
+    """Parse and validate command-line arguments for the WiFi-Radar application.
+
+    Arguments defined:
+        --simulation          Run with synthetic CSI instead of a real router.
+        --router-ip           IPv4 address of the CSI-capable router (default 192.168.1.1).
+        --router-port         TCP port the router firmware streams CSI on (default 5500).
+        --dashboard-port      HTTP port for the Dash web UI (default 8050).
+        --rtmp-url            RTMP destination for the live H.264 stream.
+        --debug               Enable DEBUG-level logging.
+        --config              Path to a YAML configuration file.
+        --house-visualization Enable the optional pygame top-down room view.
+        --record              Record incoming CSI frames to disk.
+        --output-dir          Directory for recorded CSI data (default ~/wifi_data).
+        --replay              Replay a previously recorded CSI file.
+        --weights             Path to a .pth model checkpoint.
+        --num-people          Number of simulated people in simulation mode (1–4).
+        --export-onnx         Export models to ONNX then exit immediately.
+
+    Returns:
+        ``argparse.Namespace`` with all parsed argument values.
+    """
     parser = argparse.ArgumentParser(
         description="WiFi-Radar: Human Pose Estimation through WiFi Signals"
     )
@@ -91,10 +131,18 @@ def parse_args():
 
 
 def setup_logging(debug: bool = False) -> None:
-    """Set up logging configuration.
+    """Configure root logger with console and rotating file handlers.
+
+    Log format: ``%(asctime)s - %(name)s - %(levelname)s - %(message)s``
 
     Args:
-        debug: If True, set log level to DEBUG, otherwise INFO
+        debug: When True sets the root log level to DEBUG; otherwise INFO.
+               DEBUG mode emits per-frame inference timings and track events
+               which are too verbose for normal operation.
+
+    Side Effects:
+        Configures the root ``logging`` logger.
+        Creates / appends to ``wifi_radar.log`` in the current working directory.
     """
     level = logging.DEBUG if debug else logging.INFO
 
@@ -106,7 +154,27 @@ def setup_logging(debug: bool = False) -> None:
 
 
 def load_config(config_path=None):
-    """Load configuration from file or use defaults."""
+    """Load application configuration, merging built-in defaults with a YAML file.
+
+    The returned dict has the following top-level sections:
+        ``router``              — IP, port, NIC interface, CSI format.
+        ``system``              — simulation mode, debug flag, data directory.
+        ``dashboard``           — HTTP port, theme, update interval, history length.
+        ``streaming``           — RTMP URL, frame dimensions, FPS, bitrate.
+        ``house_visualization`` — enable flag, window size, FPS, wall transparency.
+
+    Args:
+        config_path: Optional path to a YAML file.  Keys present in the file
+                     override the corresponding default values.  Extra top-level
+                     sections not in the defaults are added verbatim.
+
+    Returns:
+        Nested ``dict`` with the merged configuration.
+
+    Failure Modes:
+        If ``config_path`` is provided but unreadable or contains invalid YAML,
+        the error is logged and the built-in defaults are returned unchanged.
+    """
     import yaml
 
     # Default configuration
@@ -166,7 +234,28 @@ def load_config(config_path=None):
 
 
 def main():
-    """Main function to run the WiFi-Radar system."""
+    """Initialise and run the complete WiFi-Radar pipeline.
+
+    Execution sequence:
+        1. Parse CLI arguments and set up logging.
+        2. Load YAML configuration and apply CLI overrides.
+        3. Optionally delegate to scripts/export_onnx.py and exit.
+        4. Instantiate CSICollector, SignalProcessor, DualBranchEncoder,
+           PoseEstimator, MultiPersonTracker, FallDetector per-person,
+           GaitAnalyzer per-person, Dashboard, RTMPStreamer, and optionally
+           HouseVisualizer.
+        5. Load a .pth checkpoint into the encoder + pose estimator if available.
+        6. Start CSICollector, RTMPStreamer, and HouseVisualizer daemon threads.
+        7. Launch the ``processing_thread`` daemon that runs the main inference loop.
+        8. Block on ``Dashboard.run()`` (Dash HTTP server) until interrupted.
+        9. On KeyboardInterrupt or exception: stop all components and exit cleanly.
+
+    Side Effects:
+        Reads from the filesystem (config, weights).
+        Spawns multiple daemon threads.
+        Listens on dashboard and RTMP network ports.
+        Writes logs to ``wifi_radar.log``.
+    """
     # Parse command line arguments
     args = parse_args()
 
@@ -297,7 +386,27 @@ def main():
         import torch
 
         def processing_thread():
-            logger.info("Starting data processing thread")
+            """Main inference loop: CSI → signal process → encode → pose → track → alert.
+
+            Runs continuously as a daemon thread until the process exits or an
+            unhandled exception is caught.
+
+            Per-frame pipeline:
+                1. Block on ``csi_collector.get_csi_data()`` (≤1 s timeout).
+                2. Run ``signal_processor.process()`` (phase unwrap + normalise + filter).
+                3. Convert numpy arrays to float32 tensors and move to ``device``.
+                4. Run ``encoder.forward()`` → 256-d feature vector.
+                5. Run ``pose_estimator.forward()`` → keypoints + confidence.
+                6. Run ``pose_estimator.detect_people()`` → list of person dicts.
+                7. Run ``mp_tracker.update()`` → list of ``TrackedPerson`` with stable IDs.
+                8. For each tracked person: run ``FallDetector.update()`` and
+                   ``GaitAnalyzer.update()``; per-person instances are created lazily.
+                9. Push results to Dashboard (thread-safe) and RTMPStreamer.
+
+            Side Effects:
+                Writes to ``dashboard`` and ``rtmp_streamer`` via thread-safe methods.
+                Lazily populates ``fall_detectors`` and ``gait_analysers`` dicts.
+            """
             hidden_state = None
             frame_id = 0
 

@@ -67,7 +67,31 @@ def export_encoder(
     opset: int,
     batch: int = 1,
 ) -> None:
-    model = _EncoderWrapper(encoder)
+    """Export DualBranchEncoder to ONNX format.
+
+    ONNX export rationale:
+        - ``export_params=True``: Embed trained weights in the .onnx file so the
+          runtime does not need a separate parameter file.
+        - ``do_constant_folding=True``: Pre-compute static sub-expressions at
+          export time (e.g. BatchNorm fused into Conv weights) to reduce runtime
+          inference latency.
+        - ``dynamic_axes``: Only the batch dimension is dynamic; spatial and
+          channel dimensions are fixed at (3, 3, 64) as documented in the model.
+          Making the batch axis dynamic allows the runtime to serve arbitrary
+          batch sizes without re-exporting.
+        - Opset 17 (default): First opset with ``AdaptiveAveragePool`` support
+          required by DualBranchEncoder.  Pass ``--opset 18`` to target newer runtimes.
+
+    Args:
+        encoder:     Trained (or random-initialised) DualBranchEncoder in eval mode.
+        output_path: Destination file path (e.g. ``weights/encoder.onnx``).
+        opset:       ONNX opset version (≥ 17 required for AdaptiveAvgPool).
+        batch:       Batch size for the dummy input used during tracing.
+
+    Side Effects:
+        Writes an ONNX model file to ``output_path``.
+        Logs an info message on success.
+    """
     model.eval()
 
     dummy_amp   = torch.randn(batch, 3, 3, 64)
@@ -97,7 +121,28 @@ def export_pose_estimator(
     opset: int,
     batch: int = 1,
 ) -> None:
-    model = _PoseEstimatorWrapper(pose_estimator)
+    """Export PoseEstimator (single-frame, no LSTM hidden state) to ONNX.
+
+    ONNX export rationale:
+        - ``_PoseEstimatorWrapper`` strips the LSTM hidden-state tuple from
+          the return value because ONNX does not support optional tuple outputs
+          natively.  The wrapper returns only (keypoints, confidence), which
+          map cleanly to two named ONNX output tensors.
+        - ``do_constant_folding=True``: Fuses the sigmoid activations in the
+          confidence head where possible.
+        - The feature input axis is the only dynamic axis; keypoint count and
+          coordinate dimension are always (17, 3) at inference time.
+
+    Args:
+        pose_estimator: Trained PoseEstimator in eval mode.
+        output_path:    Destination file path (e.g. ``weights/pose_estimator.onnx``).
+        opset:          ONNX opset version.
+        batch:          Batch size for the dummy input tensor.
+
+    Side Effects:
+        Writes an ONNX model file to ``output_path``.
+        Logs an info message on success.
+    """
     model.eval()
 
     dummy_features = torch.randn(batch, 256)
@@ -191,7 +236,23 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    args = parse_args()
+    """Export WiFi-Radar models to ONNX and optionally validate against OnnxRuntime.
+
+    Steps:
+        1. Parse CLI arguments.
+        2. Instantiate DualBranchEncoder and PoseEstimator on CPU.
+        3. Load a .pth checkpoint if ``--weights`` is provided; otherwise export
+           with random weights (useful for graph-structure validation only).
+        4. Set both models to eval mode (disables BatchNorm training stats and Dropout).
+        5. Call ``export_encoder()`` and ``export_pose_estimator()``.
+        6. Optionally run ``validate_with_onnxruntime()`` to confirm that ONNX
+           Runtime output matches the PyTorch reference within 1e-4 tolerance.
+
+    Side Effects:
+        Creates ``args.output_dir`` if needed.
+        Writes two .onnx files to ``args.output_dir``.
+        Logs paths of the generated files on completion.
+    """
     os.makedirs(args.output_dir, exist_ok=True)
 
     device  = torch.device("cpu")

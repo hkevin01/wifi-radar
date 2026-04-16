@@ -74,6 +74,20 @@ class Dashboard:
     # ═══════════════════════════════════════════════════════════════════════ #
 
     def _setup_layout(self) -> None:
+        """Build the top-level Dash layout and assign it to ``self.app.layout``.
+
+        Structure:
+            - Header row: app title + subtitle.
+            - ``dcc.Tabs`` with three tabs (Monitor / Events / Configuration).
+            - ``html.Div#tab-content`` populated by the ``render_tab`` callback.
+            - Two ``dcc.Interval`` timers:
+                ``fast-interval`` (``update_interval_ms`` ms) drives live data updates.
+                ``slow-interval`` (2 000 ms) drives the events panel.
+            - ``dcc.Store#config-save-result`` for inter-callback state passing.
+
+        Side Effects:
+            Sets ``self.app.layout`` (mutates the Dash application).
+        """
         self.app.layout = dbc.Container(
             [
                 dbc.Row([
@@ -108,9 +122,21 @@ class Dashboard:
     # ── Tab content builders ─────────────────────────────────────────────── #
 
     def _monitor_tab(self) -> html.Div:
+        """Build the Live Monitor tab layout.
+
+        Contains:
+            - An 8-column ``dcc.Graph#pose-graph`` showing the live 3-D skeleton.
+            - A 4-column sidebar with:
+                ``people-counter`` — headline count of detected people.
+                ``confidence-graph`` — rolling confidence + people-count sparkline.
+                ``system-status``   — running/no-data text indicator.
+                ``csi-graph``       — raw CSI amplitude and phase for TX0·RX0.
+
+        Returns:
+            ``html.Div`` subtree for the monitor tab.
+        """
         return html.Div([
             dbc.Row([
-                # 3-D pose graph
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader("Human Pose (3-D)"),
@@ -155,9 +181,19 @@ class Dashboard:
         ])
 
     def _events_tab(self) -> html.Div:
+        """Build the Events tab layout.
+
+        Contains:
+            - Left column ``fall-events-list``: scrollable list of fall alerts,
+              populated by the ``update_events`` callback every 2 seconds.
+            - Right column ``gait-metrics-panel``: table of current gait metrics
+              (cadence, stride length, step symmetry, speed, step count, window).
+
+        Returns:
+            ``html.Div`` subtree for the events tab.
+        """
         return html.Div([
             dbc.Row([
-                # Fall events
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader("🚨 Fall Detection Alerts"),
@@ -180,6 +216,22 @@ class Dashboard:
         ])
 
     def _config_tab(self) -> html.Div:
+        """Build the Configuration tab layout with live-editable settings.
+
+        Sections:
+            - Router / Source: IP, port, simulation toggle.
+            - Detection Settings: confidence threshold slider, max-people input.
+            - RTMP Streaming: URL and FPS.
+            - Fall Detection: enable toggle, velocity threshold slider,
+              angle threshold slider.
+            - Save button + feedback alert + restart-required notice.
+
+        All input widgets are pre-populated from ``self._config`` so the UI
+        reflects the currently active configuration on first render.
+
+        Returns:
+            ``html.Div`` subtree for the configuration tab.
+        """
         cfg = self._config
         router  = cfg.get("router", {})
         system  = cfg.get("system", {})
@@ -300,6 +352,23 @@ class Dashboard:
     # ═══════════════════════════════════════════════════════════════════════ #
 
     def _setup_callbacks(self) -> None:
+        """Register all Dash reactive callbacks with ``self.app``.
+
+        Callbacks registered:
+            ``render_tab``        — routes tab value to the correct layout builder.
+            ``update_monitor``    — fast-interval: updates pose/CSI/confidence figures
+                                    and the people counter and system status string.
+            ``update_events``     — slow-interval: refreshes the fall-events list and
+                                    gait-metrics table.
+            ``update_conf_label`` — live label for the confidence-threshold slider.
+            ``update_vel_label``  — live label for the velocity-threshold slider.
+            ``update_angle_label``— live label for the angle-threshold slider.
+            ``save_config``       — serialises form values to YAML and invokes
+                                    ``self._on_config_change`` if registered.
+
+        Side Effects:
+            Mutates ``self.app`` by registering Dash Input/Output/State bindings.
+        """
 
         # ── Tab routing ──────────────────────────────────────────────────── #
         @self.app.callback(
@@ -307,6 +376,14 @@ class Dashboard:
             Input("main-tabs", "value"),
         )
         def render_tab(tab):
+            """Return the layout subtree for the selected tab.
+
+            Args:
+                tab: The ``value`` of the active ``dcc.Tab`` component.
+
+            Returns:
+                ``html.Div`` for the selected tab (monitor / events / config).
+            """
             if tab == "tab-monitor":
                 return self._monitor_tab()
             if tab == "tab-events":
@@ -326,6 +403,20 @@ class Dashboard:
             Input("fast-interval", "n_intervals"),
         )
         def update_monitor(n):
+            """Refresh all live-monitor widgets on each fast-interval tick.
+
+            Reads shared state under ``self.data_lock``, then builds updated
+            Plotly figures without holding the lock (avoids blocking the
+            processing thread).  Appends the latest confidence value to the
+            rolling history deque before building the sparkline figure.
+
+            Args:
+                n: Interval tick counter (unused; triggers reactivity only).
+
+            Returns:
+                Tuple (pose_fig, conf_fig, csi_fig, n_people_str,
+                       status_text, status_css_class).
+            """
             with self.data_lock:
                 pose     = self.pose_data
                 conf     = self.confidence_data
@@ -357,6 +448,19 @@ class Dashboard:
             Input("slow-interval", "n_intervals"),
         )
         def update_events(n):
+            """Refresh the fall-events list and gait-metrics table every 2 seconds.
+
+            Reads ``self._fall_events`` and ``self._gait_metrics`` under
+            ``self._events_lock``.  Fall events are shown newest-first (up to 20).
+            Severity levels map to Bootstrap alert colours:
+                1 (possible) → warning, 2 (detected) → danger, 3 (alert) → danger.
+
+            Args:
+                n: Slow-interval tick counter (triggers reactivity only).
+
+            Returns:
+                Tuple (fall_event_ui_elements, gait_metrics_ui_elements).
+            """
             with self._events_lock:
                 events  = list(self._fall_events)
                 metrics = self._gait_metrics
@@ -408,6 +512,7 @@ class Dashboard:
             Input("cfg-conf-threshold", "value"),
         )
         def update_conf_label(v):
+            """Format the confidence-threshold slider label with the current value."""
             return f"Confidence Threshold: {v:.2f}" if v is not None else "Confidence Threshold"
 
         @self.app.callback(
@@ -415,6 +520,7 @@ class Dashboard:
             Input("cfg-fall-velocity", "value"),
         )
         def update_vel_label(v):
+            """Format the fall-velocity-threshold slider label with the current value."""
             return f"Velocity Threshold: {v:.2f}" if v is not None else "Velocity Threshold"
 
         @self.app.callback(
@@ -422,6 +528,7 @@ class Dashboard:
             Input("cfg-fall-angle", "value"),
         )
         def update_angle_label(v):
+            """Format the fall-angle-threshold slider label with the current value."""
             return f"Angle Threshold: {int(v)}°" if v is not None else "Angle Threshold"
 
         # ── Save config ──────────────────────────────────────────────────── #
@@ -445,6 +552,28 @@ class Dashboard:
         def save_config(n_clicks, router_ip, router_port, simulation,
                         conf_thr, max_people, rtmp_url, stream_fps,
                         fall_enabled, fall_vel, fall_angle):
+            """Persist form values to YAML and invoke the config-change callback.
+
+            Constructs a nested config dict from the form field values, writes it
+            to ``self._config_path`` with ``yaml.safe_dump``, updates the in-memory
+            config, and calls ``self._on_config_change(new_config)`` if registered.
+
+            Args:
+                n_clicks:    Button click count; callback does nothing when 0 or None.
+                router_ip:   Router IP address string.
+                router_port: Router TCP port integer.
+                simulation:  Simulation-mode boolean toggle value.
+                conf_thr:    Confidence threshold float (0.1–0.9).
+                max_people:  Maximum simultaneous tracked people (1–8).
+                rtmp_url:    RTMP destination URL string.
+                stream_fps:  Streaming frame rate integer.
+                fall_enabled: Fall detection enabled boolean.
+                fall_vel:    Velocity threshold float (negative, m/s normalised).
+                fall_angle:  Angle threshold float in degrees.
+
+            Returns:
+                ``dbc.Alert`` with success or failure message.
+            """
             if not n_clicks:
                 return ""
             try:
@@ -485,6 +614,14 @@ class Dashboard:
     # ═══════════════════════════════════════════════════════════════════════ #
 
     def _empty_pose_fig(self) -> go.Figure:
+        """Return a blank 3-D scatter figure used before any pose data arrives.
+
+        The figure shows an empty cube with labelled axes and a 'Waiting for data'
+        title, preventing the graph component from displaying a grey placeholder.
+
+        Returns:
+            ``go.Figure`` with a 3-D scatter scene (no data points).
+        """
         fig = go.Figure(go.Scatter3d(x=[], y=[], z=[], mode="markers",
                                      marker=dict(size=0, opacity=0)))
         fig.update_layout(
@@ -502,6 +639,21 @@ class Dashboard:
         return fig
 
     def _update_pose_figure(self, pose_data: Optional[Dict]) -> go.Figure:
+        """Build a 3-D scatter figure from the latest pose keypoints.
+
+        Renders:
+            - Keypoint markers coloured by confidence (Viridis colorscale).
+            - Skeleton edge lines for the 15 COCO-17 limb connections.
+            - Low-confidence keypoints (< 0.3) replaced with NaN so they are
+              invisible without removing them from the trace index.
+
+        Args:
+            pose_data: Dict with ``keypoints`` (17, 3) and ``confidence`` (17,),
+                       or None (returns ``_empty_pose_fig()``).
+
+        Returns:
+            Plotly ``go.Figure`` with scatter3d keypoints and line traces.
+        """
         if pose_data is None:
             return self._empty_pose_fig()
 
@@ -546,6 +698,7 @@ class Dashboard:
         return fig
 
     def _empty_confidence_fig(self) -> go.Figure:
+        """Return a blank confidence sparkline figure (used during initialisation)."""
         fig = go.Figure()
         fig.update_layout(
             xaxis=dict(title="Time", showticklabels=False),
@@ -559,6 +712,17 @@ class Dashboard:
         return fig
 
     def _update_confidence_figure(self) -> go.Figure:
+        """Build the rolling confidence + people-count sparkline from history deques.
+
+        Renders two overlaid line traces:
+            - Confidence (solid green): mean per-keypoint confidence over time.
+            - People count (dashed orange): number of detected people over time.
+
+        Both traces share the same X axis (frame index) and Y axis [0, 1.1].
+
+        Returns:
+            Plotly ``go.Figure`` with the two line traces.
+        """
         fig = go.Figure()
         if self.confidence_history:
             x = list(range(len(self.confidence_history)))
@@ -581,6 +745,7 @@ class Dashboard:
         return fig
 
     def _empty_csi_fig(self) -> go.Figure:
+        """Return a blank CSI subcarrier figure (used during initialisation)."""
         fig = go.Figure()
         fig.update_layout(xaxis_title="Subcarrier", yaxis_title="Amplitude",
                           margin=dict(l=10, r=10, t=10, b=10), height=200,
@@ -589,6 +754,19 @@ class Dashboard:
         return fig
 
     def _update_csi_figure(self, csi_data: Optional[Tuple]) -> go.Figure:
+        """Build the CSI subcarrier figure from the first TX-RX pair.
+
+        Renders amplitude (left Y axis) and phase (right Y axis) for antenna
+        pair (TX0, RX0) across all subcarriers so the operator can verify the
+        raw signal quality.
+
+        Args:
+            csi_data: Tuple (amplitude, phase) where each array is shaped
+                      (num_tx, num_rx, num_subcarriers), or None.
+
+        Returns:
+            Plotly ``go.Figure`` with dual-Y-axis line traces.
+        """
         fig = go.Figure()
         if csi_data is not None:
             amp, phase = csi_data
@@ -625,6 +803,23 @@ class Dashboard:
         csi_data: Optional[Tuple] = None,
         tracked_people: Optional[List] = None,
     ) -> None:
+        """Thread-safe update of live inference results for the next dashboard refresh.
+
+        Called by the processing thread after each forward pass.  Only non-None
+        arguments overwrite the corresponding fields, so partial updates (e.g.
+        updating only ``csi_data``) are safe.
+
+        Args:
+            pose_data:        Dict with ``keypoints`` (17, 3) and ``confidence`` (17,).
+            confidence_data:  (17,) confidence array for the primary person.
+            csi_data:         Tuple (amplitude, phase) raw CSI arrays.
+            tracked_people:   List of TrackedPerson-like dicts with ``person_id``,
+                              ``keypoints``, and ``confidence`` fields.
+
+        Thread Safety:
+            All writes are wrapped in ``self.data_lock``.  The fast-interval
+            callback reads the same fields under the same lock.
+        """
         with self.data_lock:
             if pose_data       is not None: self.pose_data       = pose_data
             if confidence_data is not None: self.confidence_data = confidence_data
@@ -636,6 +831,16 @@ class Dashboard:
         fall_events: Optional[List[Dict]] = None,
         gait_metrics: Optional[Dict]      = None,
     ) -> None:
+        """Thread-safe append of fall events and replacement of gait metrics.
+
+        Args:
+            fall_events:  List of fall-event dicts to append.  The internal list
+                          is capped at 50 entries (oldest are dropped).
+            gait_metrics: Latest gait metrics dict; replaces previous value.
+
+        Thread Safety:
+            All mutations are wrapped in ``self._events_lock``.
+        """
         with self._events_lock:
             if fall_events is not None:
                 self._fall_events.extend(fall_events)
@@ -652,5 +857,17 @@ class Dashboard:
     # ═══════════════════════════════════════════════════════════════════════ #
 
     def run(self, debug: bool = False, port: int = 8050) -> None:
+        """Start the Dash development server (blocking).
+
+        Args:
+            debug: If True, enables Dash hot-reloading and error overlays.
+                   Should be False in production to avoid exposing debug info.
+            port:  TCP port the dashboard HTTP server listens on.
+
+        Side Effects:
+            Blocks the calling thread until the server is stopped (Ctrl-C or
+            process termination).  ``use_reloader=False`` prevents the Werkzeug
+            reloader from spawning a second process that would duplicate threads.
+        """
         self.logger.info("Starting dashboard on port %d", port)
         self.app.run(debug=debug, port=port, use_reloader=False)

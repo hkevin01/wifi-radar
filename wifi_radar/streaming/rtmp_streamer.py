@@ -1,19 +1,79 @@
+"""
+ID: WR-STREAM-RTMP-001
+Requirement: Encode rendered pose frames in real time and push them to an RTMP
+             endpoint so downstream consumers (OBS, VLC, nginx-rtmp, media
+             players) can receive a live H.264 stream of the detected poses.
+Purpose: Decouples frame rendering from the inference pipeline.  The streamer
+         runs in its own daemon thread, consuming the latest rendered frame at
+         a fixed frame rate without blocking the data-processing loop.
+Architecture:
+    update_frame()  (called by processing thread)
+          │  thread-safe frame_lock
+          ▼
+    self.latest_frame  (shared numpy BGR image)
+          │
+    _stream_loop()  (daemon thread, ~fps iterations/s)
+          │
+    FFmpeg subprocess  (rawvideo → libx264 → FLV/RTMP)
+          │
+    RTMP server  (nginx-rtmp, RTMP broker, etc.)
+FFmpeg lifecycle:
+    _initialize_ffmpeg() — spawns a new subprocess.Popen; old process is
+                           terminated first if still alive.
+    _stream_loop()       — writes BGR bytes to stdin; restarts FFmpeg on
+                           write error or dead process detection.
+    stop()               — closes stdin, waits up to 5 s for graceful exit,
+                           then SIGKILL if still running.
+Constraints:
+    - Requires FFmpeg with libx264 support installed in PATH.
+    - ``cv2`` (OpenCV) is used only for frame rendering (circle, line, text).
+    - Frame writes are non-blocking from the inference thread's perspective;
+      if the stream falls behind, the latest frame is re-sent until updated.
+"""
 import logging
 import os
 import subprocess
-import tempfile
 import threading
 import time
 
 import cv2
-import ffmpeg
 import numpy as np
 
 
 class RTMPStreamer:
-    """Streams pose visualization via RTMP protocol."""
+    """Renders pose skeletons to BGR frames and streams them via RTMP/FFmpeg.
+
+    The streamer manages its own background daemon thread that writes frames
+    to an FFmpeg subprocess at a fixed rate.  The inference pipeline calls
+    ``update_frame()`` to publish new pose data; the stream thread reads the
+    latest frame under a lock and pushes it to FFmpeg's stdin.
+
+    Attributes:
+        rtmp_url:        Destination RTMP URL (e.g. ``rtmp://localhost/live/wifi_radar``).
+        width:           Output frame width in pixels.
+        height:          Output frame height in pixels.
+        fps:             Target streaming frame rate.
+        latest_frame:    Most recently rendered BGR image (numpy array).
+        frame_lock:      ``threading.Lock`` protecting ``latest_frame``.
+        running:         True while the stream thread is active.
+        ffmpeg_process:  Active ``subprocess.Popen`` handle, or None.
+    """
 
     def __init__(self, rtmp_url=None, width=640, height=480, fps=30):
+        """Initialise the streamer without starting any threads or processes.
+
+        Args:
+            rtmp_url: RTMP destination URL.  Defaults to
+                      ``rtmp://localhost/live/wifi_radar`` when None.
+            width:    Frame width in pixels (must match FFmpeg ``-s`` argument).
+            height:   Frame height in pixels.
+            fps:      Target output frame rate used for both FFmpeg and the
+                      sleep interval in ``_stream_loop()``.
+
+        Side Effects:
+            Creates ``self.frame_lock`` (threading.Lock).  Does NOT start any
+            thread or subprocess — call ``start()`` for that.
+        """
         self.logger = logging.getLogger("RTMPStreamer")
 
         # If no URL provided, use a default local URL
@@ -32,7 +92,21 @@ class RTMPStreamer:
         self.ffmpeg_process = None
 
     def start(self):
-        """Start the RTMP streaming thread."""
+        """Spawn the background streaming thread and begin RTMP output.
+
+        The thread targets ``_stream_loop()``, which initialises FFmpeg and
+        then writes frames at ``self.fps`` until ``stop()`` is called.
+
+        Side Effects:
+            Sets ``self.running = True``.
+            Spawns ``self.stream_thread`` as a daemon thread so it is
+            automatically killed when the main process exits.
+
+        Failure Modes:
+            If FFmpeg is not found in PATH, ``_initialize_ffmpeg()`` will log
+            the error and set ``self.ffmpeg_process = None``.  The stream
+            thread continues running; each write attempt will try to reinitialise.
+        """
         if self.running:
             self.logger.warning("Streaming is already running")
             return
@@ -45,7 +119,18 @@ class RTMPStreamer:
         self.logger.info(f"Started RTMP streaming to {self.rtmp_url}")
 
     def stop(self):
-        """Stop the RTMP streaming."""
+        """Stop the streaming thread and terminate the FFmpeg subprocess.
+
+        Lifecycle:
+            1. Sets ``self.running = False`` so the stream loop exits cleanly.
+            2. Joins the stream thread (timeout = 2 s) to wait for graceful exit.
+            3. Closes FFmpeg's stdin pipe to signal end-of-stream, then waits
+               up to 5 s for the process to finish encoding and exit.
+            4. If the process is still alive after the wait, sends SIGKILL.
+
+        Side Effects:
+            Sets ``self.ffmpeg_process = None`` after cleanup.
+        """
         self.running = False
 
         if self.stream_thread:
@@ -59,7 +144,7 @@ class RTMPStreamer:
                 self.logger.error(f"Error stopping FFmpeg process: {e}")
                 try:
                     self.ffmpeg_process.kill()
-                except:
+                except Exception:
                     pass
 
             self.ffmpeg_process = None
@@ -67,12 +152,29 @@ class RTMPStreamer:
         self.logger.info("Stopped RTMP streaming")
 
     def update_frame(self, pose_data, confidence_data=None, background_color=(0, 0, 0)):
-        """Update the current frame with new pose data.
+        """Render pose skeleton to a BGR frame and store it for the stream thread.
+
+        Rendering pipeline:
+            1. Create a blank ``(height, width, 3)`` BGR canvas.
+            2. Scale normalised 3-D keypoint coordinates (range [-1, 1]) to pixel
+               positions: ``pixel = (norm + 1) / 2 \u00d7 dimension``.
+            3. Draw colour-coded keypoint circles (green→red gradient by confidence).
+            4. Draw skeleton edges between pairs of valid keypoints.
+            5. Overlay a title bar and average-confidence text.
+
+        Thread safety:
+            Acquires ``self.frame_lock`` for the duration of rendering and the
+            subsequent assignment to ``self.latest_frame``, preventing the stream
+            thread from reading a partially-written frame.
 
         Args:
-            pose_data: Dictionary containing keypoints and confidence
-            confidence_data: Optional array of confidence values
-            background_color: RGB background color
+            pose_data:        Dict with keys ``keypoints`` (17, 3) and
+                              ``confidence`` (17,) — normalised 3-D coords and scores.
+            confidence_data:  Unused reserved parameter for future per-limb colouring.
+            background_color: BGR background tuple (default black).
+
+        Side Effects:
+            Updates ``self.latest_frame`` in-place under ``self.frame_lock``.
         """
         if pose_data is None:
             return
@@ -179,7 +281,23 @@ class RTMPStreamer:
             self.latest_frame = frame.copy()
 
     def _stream_loop(self):
-        """Main streaming loop that runs in a separate thread."""
+        """Background daemon thread: push frames to FFmpeg at a fixed frame rate.
+
+        Lifecycle:
+            1. Calls ``_initialize_ffmpeg()`` to start the FFmpeg subprocess.
+            2. On each iteration:
+               a. Acquires ``frame_lock`` and copies the latest rendered frame
+                  (or a blank frame if none is available yet).
+               b. Writes the raw BGR bytes to ``ffmpeg_process.stdin``.
+               c. Reinitialises FFmpeg if the write fails or the process exits.
+               d. Sleeps for the remaining time to maintain the target frame rate.
+            3. Exits when ``self.running`` is set to False by ``stop()``.
+
+        Side Effects:
+            May reinitialise ``self.ffmpeg_process`` on error via
+            ``_initialize_ffmpeg()``.  Sets ``self.running = False`` on
+            unhandled exception so the outer ``stop()`` sees a clean state.
+        """
         try:
             # Initialize FFmpeg process
             self._initialize_ffmpeg()
@@ -220,7 +338,35 @@ class RTMPStreamer:
             self.running = False
 
     def _initialize_ffmpeg(self):
-        """Initialize FFmpeg process for RTMP streaming."""
+        """Spawn (or restart) the FFmpeg subprocess for RTMP streaming.
+
+        FFmpeg command rationale:
+            ``-f rawvideo -vcodec rawvideo -pix_fmt bgr24``
+                Read raw BGR24 bytes from stdin; matches OpenCV's native pixel format.
+            ``-s WxH -r FPS``
+                Declare the input frame size and rate so FFmpeg knows how to
+                interpret the byte stream.
+            ``-i -``
+                Read from stdin (the pipe written by ``_stream_loop``).
+            ``-c:v libx264 -pix_fmt yuv420p``
+                Encode with H.264.  ``yuv420p`` is required for broad player
+                compatibility (HTML5, VLC, mobile devices).
+            ``-preset ultrafast``
+                Minimise encoder latency at the cost of slightly larger files;
+                acceptable for a live monitoring stream that is never archived.
+            ``-f flv``
+                FLV container is required by the RTMP protocol.
+            stdout/stderr → DEVNULL:
+                Suppress FFmpeg's console output to avoid polluting logs.
+
+        Lifecycle:
+            If a previous FFmpeg process is still running, its stdin is closed and
+            the process is terminated with a 5-second wait before the new one starts.
+
+        Side Effects:
+            Sets ``self.ffmpeg_process`` to the new ``subprocess.Popen`` handle,
+            or ``None`` if the subprocess could not be created.
+        """
         try:
             if self.ffmpeg_process and self.ffmpeg_process.poll() is None:
                 # Process is still running, terminate it first
