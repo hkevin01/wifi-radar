@@ -29,15 +29,52 @@ logger = logging.getLogger(__name__)
 
 
 class FallSeverity(IntEnum):
-    NORMAL         = 0   # No anomaly detected
-    POSSIBLE_FALL  = 1   # Velocity + angle criteria partially met
-    FALL_DETECTED  = 2   # Height drop confirmed
-    ALERT          = 3   # No recovery after alert_timeout_s seconds
+    """Ordered severity levels for the fall detection state machine.
+
+    ID: WR-ANALYSIS-FALL-SEV-001
+    Requirement: Enumerate the four mutually exclusive states of the fall
+                 detector state machine as comparable integer values.
+    Purpose: Allow downstream components to compare severity levels numerically
+             (e.g., severity >= FALL_DETECTED) without string comparisons.
+    Rationale: IntEnum provides both human-readable names and integer comparison;
+               values are monotonically increasing with severity.
+    Inputs:
+        N/A — class-level enumeration.
+    Outputs:
+        N/A — enumeration constants used by FallDetector and FallEvent.
+    References:
+        FallDetector._state; FallEvent.severity; WR-ANALYSIS-FALL-001.
+    """
 
 
 @dataclass
 class FallEvent:
-    """Immutable record of a detected fall event."""
+    """Immutable record of a detected fall event.
+
+    ID: WR-ANALYSIS-FALL-EVENT-001
+    Requirement: Store all contextual information about a fall state change so
+                 that the dashboard, alert system, and audit log can record
+                 a complete event without retaining the full frame buffer.
+    Purpose: Decouple the fall detector from downstream consumers by providing
+             a self-contained, serialisable event object.
+    Rationale: dataclass with typed fields provides both runtime validation and
+               IDE autocomplete; all fields are primitive types for easy JSON
+               serialisation.
+    Inputs:
+        person_id        — int: track ID of the affected person.
+        timestamp        — float: UNIX epoch seconds of detection.
+        severity         — FallSeverity: one of POSSIBLE_FALL/FALL_DETECTED/ALERT.
+        centroid_before  — Tuple[float,float,float]: normalised position before.
+        centroid_after   — Tuple[float,float,float]: normalised position after.
+        body_angle_deg   — float: torso deviation from vertical at detection.
+        message          — str: human-readable description.
+    Outputs:
+        N/A — data container only.
+    Preconditions:
+        Created by FallDetector._make_event() only.
+    References:
+        FallDetector._make_event; FallSeverity; WR-ANALYSIS-FALL-001.
+    """
     person_id:      int
     timestamp:      float            # UNIX timestamp of detection
     severity:       FallSeverity
@@ -48,23 +85,29 @@ class FallEvent:
 
 
 class FallDetector:
-    """Per-person fall detector operating on 3-D pose keypoints.
+    """Per-person fall detector operating on 3-D pose keypoints via a state machine.
 
-    State machine transitions::
-
-        NORMAL ──[velocity↓ & angle↑]──► POSSIBLE_FALL
-               ──[height drop confirmed]──► FALL_DETECTED
-               ──[no recovery within alert_timeout_s]──► ALERT
-               ──[recovery]──────────────────────────────► NORMAL
-
-    Args:
-        person_id:            Unique ID for the tracked person.
-        history_window:       Number of frames to retain (default 60 = ~3 s at 20 Hz).
-        velocity_threshold:   Minimum downward centroid velocity to trigger (negative, m/s normalised).
-        angle_threshold_deg:  Body-from-vertical angle that triggers possible-fall.
-        height_drop_frac:     Required fractional Z-drop relative to standing height.
-        recovery_frames:      Frames the body must be upright to declare recovery.
-        alert_timeout_s:      Seconds with no recovery before escalating to ALERT.
+    ID: WR-ANALYSIS-FALL-CLASS-001
+    Requirement: Maintain a four-state machine (NORMAL/POSSIBLE_FALL/
+                 FALL_DETECTED/ALERT) per person and emit FallEvent on transitions,
+                 operating at 20 Hz without blocking the inference pipeline.
+    Purpose: Provide real-time fall alerting for a single person track using
+             centroid velocity, torso angle, and height-drop heuristics.
+    Rationale: A state machine with configurable thresholds is more robust than a
+               single-threshold trigger; requiring both velocity and angle criteria
+               reduces false positives from bending/sitting motions.
+    Inputs:
+        Pose keypoints (17,3) and confidence (17,) per frame via update().
+    Outputs:
+        Optional FallEvent on state transitions; self.state for polling.
+    Preconditions:
+        At least 20 frames required before standing_z baseline is calibrated.
+    Assumptions:
+        ~20 Hz call rate; COCO-17 keypoint layout; normalised [-1,1] coordinates.
+    Constraints:
+        One FallDetector instance per tracked person (not shared between tracks).
+    References:
+        FallSeverity; FallEvent; WR-ANALYSIS-FALL-001 module docstring.
     """
 
     def __init__(
@@ -77,7 +120,44 @@ class FallDetector:
         recovery_frames: int = 15,
         alert_timeout_s: float = 5.0,
     ) -> None:
-        self.person_id = person_id
+        """Initialise state machine, rolling history buffers, and thresholds.
+
+        ID: WR-ANALYSIS-FALL-INIT-001
+        Requirement: Store all threshold parameters, initialise deque history
+                     buffers, and set initial state to FallSeverity.NORMAL.
+        Purpose: Prepare the per-person fall detector for the first update() call.
+        Rationale: deque with maxlen automatically evicts old frames; initialising
+                   standing_z to None defers baseline calibration to the first 20
+                   frames of data.
+        Inputs:
+            person_id           — int: unique track identifier.
+            history_window      — int: frame buffer depth (default 60 ~ 3 s at 20 Hz).
+            velocity_threshold  — float < 0: downward centroid velocity trigger.
+            angle_threshold_deg — float > 0: torso-from-vertical trigger angle.
+            height_drop_frac    — float (0,1): fraction of standing Z required to drop.
+            recovery_frames     — int: consecutive upright frames for recovery.
+            alert_timeout_s     — float: seconds without recovery before ALERT.
+        Outputs:
+            None — initialises self.
+        Preconditions:
+            None.
+        Postconditions:
+            self._state == FallSeverity.NORMAL; all history deques empty.
+        Assumptions:
+            update() will be called at ~20 Hz.
+        Side Effects:
+            Allocates three deque objects.
+        Failure Modes:
+            None expected at construction time.
+        Error Handling:
+            None required.
+        Constraints:
+            standing_z calibration requires 20 consecutive update() calls.
+        Verification:
+            Unit test: construct; assert state == NORMAL and standing_z is None.
+        References:
+            collections.deque; FallSeverity.NORMAL; WR-ANALYSIS-FALL-CLASS-001.
+        """
         self.velocity_threshold  = velocity_threshold
         self.angle_threshold_deg = angle_threshold_deg
         self.height_drop_frac    = height_drop_frac
@@ -106,13 +186,40 @@ class FallDetector:
     ) -> Optional[FallEvent]:
         """Process one frame and return a FallEvent if the state changes.
 
-        Args:
-            keypoints:  (17, 3) array of normalised 3-D keypoint coordinates.
-            confidence: (17,)  array of per-keypoint confidence scores [0, 1].
-            timestamp:  UNIX time.  Uses ``time.time()`` when None.
-
-        Returns:
-            A :class:`FallEvent` when the severity level changes, else ``None``.
+        ID: WR-ANALYSIS-FALL-UPDATE-001
+        Requirement: Compute centroid and body angle for the current frame,
+                     advance the state machine, and return a FallEvent whenever
+                     the severity level changes.
+        Purpose: Provide the single call-per-frame API consumed by the processing
+                 thread without requiring it to understand state machine internals.
+        Rationale: Centralising all state transitions in update() ensures the
+                   machine always receives a consistent, ordered sequence of frames.
+        Inputs:
+            keypoints  — (17,3) float32: normalised 3-D keypoint coordinates.
+            confidence — (17,) float32: per-keypoint confidence [0,1].
+            timestamp  — Optional[float]: UNIX epoch; auto-fills with time.time() if None.
+        Outputs:
+            Optional[FallEvent] — non-None only on severity state transitions.
+        Preconditions:
+            keypoints.shape == (17,3); confidence.shape == (17,).
+        Postconditions:
+            History deques updated; state machine potentially advanced.
+        Assumptions:
+            Called at ~20 Hz; COCO-17 keypoint layout.
+        Side Effects:
+            Updates self._centroid_z_history, self._angle_history, self._timestamps.
+            May update self._state, self._fall_detected_time, self._standing_z.
+        Failure Modes:
+            All-low confidence: centroid falls back to zero vector; may miss fall.
+        Error Handling:
+            Returns None if standing_z not yet calibrated (first 20 frames).
+        Constraints:
+            Not thread-safe; not idempotent.
+        Verification:
+            Unit test: simulate step-function Z drop; assert FALL_DETECTED event returned.
+        References:
+            _weighted_centroid; _body_angle; _centroid_velocity; _recovery_detected;
+            _make_event; WR-ANALYSIS-FALL-001.
         """
         ts = timestamp if timestamp is not None else time.time()
 
@@ -176,14 +283,59 @@ class FallDetector:
 
     @property
     def state(self) -> FallSeverity:
-        return self._state
+        """Current fall detection state.
+
+        ID: WR-ANALYSIS-FALL-STATE-001
+        Requirement: Return the current FallSeverity state without mutating it.
+        Purpose: Allow polling consumers to read the state without calling update().
+        Rationale: Property prevents accidental external mutation of _state.
+        Inputs:
+            None.
+        Outputs:
+            FallSeverity — current state (NORMAL/POSSIBLE_FALL/FALL_DETECTED/ALERT).
+        Preconditions:
+            None.
+        Side Effects:
+            None — read-only.
+        Verification:
+            Unit test: construct; assert state == FallSeverity.NORMAL.
+        References:
+            FallSeverity; WR-ANALYSIS-FALL-CLASS-001.
+        """
 
     # ------------------------------------------------------------------ #
     # Private helpers                                                      #
     # ------------------------------------------------------------------ #
 
     def _weighted_centroid(self, keypoints: np.ndarray, confidence: np.ndarray) -> np.ndarray:
-        """Confidence-weighted centroid of valid keypoints."""
+        """Confidence-weighted centroid of valid keypoints (threshold 0.3).
+
+        ID: WR-ANALYSIS-FALL-CENTROID-001
+        Requirement: Select keypoints with confidence > 0.3 and return the
+                     weighted mean position as a (3,) float32 vector.
+        Purpose: Compute a robust body centre for velocity and height tracking.
+        Rationale: Confidence weighting suppresses noisy low-confidence keypoints;
+                   zero-vector fallback prevents NaN propagation.
+        Inputs:
+            keypoints  — (17,3) float32: normalised keypoint coordinates.
+            confidence — (17,) float32: per-keypoint confidence [0,1].
+        Outputs:
+            (3,) float32 centroid; zero vector if all confidence <= 0.3.
+        Preconditions:
+            keypoints.shape == (17,3); confidence.shape == (17,).
+        Postconditions:
+            Return value has no NaN when at least one valid keypoint exists.
+        Side Effects:
+            None — pure function.
+        Failure Modes:
+            All confidence <= 0.3: returns zero vector.
+        Error Handling:
+            `not np.any(mask)` guard prevents division by zero.
+        Verification:
+            Unit test: uniform confidence 0.5; assert centroid near mean of keypoints.
+        References:
+            np.linalg.norm; WR-MODEL-MPT-TRACKER-CENTROID-001 (analogous).
+        """
         mask = confidence > 0.3
         if not np.any(mask):
             return np.zeros(3, dtype=np.float32)
@@ -191,7 +343,40 @@ class FallDetector:
         return (keypoints[mask] * w[:, None]).sum(axis=0) / w.sum()
 
     def _body_angle(self, keypoints: np.ndarray, confidence: np.ndarray) -> float:
-        """Angle (degrees) of spine vector from vertical [0 = upright, 90 = horizontal]."""
+        """Compute torso-from-vertical angle in degrees (0 = upright, 90 = horizontal).
+
+        ID: WR-ANALYSIS-FALL-ANGLE-001
+        Requirement: Estimate the angle between the spine vector (shoulder midpoint
+                     to hip midpoint) and the vertical (Z) axis in degrees.
+        Purpose: Detect horizontal/prone body orientation as a fall indicator
+                 complementing the centroid velocity criterion.
+        Rationale: Using shoulder and hip midpoints rather than single keypoints
+                   reduces noise from asymmetric pose estimates.
+        Inputs:
+            keypoints  — (17,3) float32: normalised 3-D keypoint coordinates.
+            confidence — (17,) float32: per-keypoint confidence [0,1].
+        Outputs:
+            float — torso angle in degrees [0, 90]; returns 0.0 if data unavailable.
+        Preconditions:
+            COCO-17 keypoints: indices 5,6 = shoulders; 11,12 = hips.
+        Postconditions:
+            Return value in [0.0, 90.0] (arccos mapped from [0,pi/2]).
+        Assumptions:
+            Shoulder and hip keypoints have confidence > 0.2 for a valid estimate.
+        Side Effects:
+            None — pure function.
+        Failure Modes:
+            Low-confidence keypoints (< 0.2): returns 0.0 (assume upright).
+            Near-zero spine length: returns 0.0 to avoid division by zero.
+        Error Handling:
+            Confidence guard; spine_len < 1e-6 guard; np.clip to [0,1].
+        Constraints:
+            Only uses 4 keypoints (shoulders + hips); robust to partial occlusion.
+        Verification:
+            Unit test: horizontal spine (spine=[0,0,0] z-component); assert angle==90.
+        References:
+            COCO-17 keypoint indices; np.arccos; WR-ANALYSIS-FALL-001.
+        """
         idx_top = [_LEFT_SHOULDER, _RIGHT_SHOULDER]
         idx_bot = [_LEFT_HIP, _RIGHT_HIP]
 
@@ -216,7 +401,37 @@ class FallDetector:
         return float(np.degrees(np.arccos(cos_theta)))
 
     def _centroid_velocity(self) -> float:
-        """Estimate instantaneous vertical velocity from last 5 centroid-z samples."""
+        """Estimate instantaneous vertical velocity from the last 5 centroid-z samples.
+
+        ID: WR-ANALYSIS-FALL-VELOCITY-001
+        Requirement: Compute the finite-difference dZ/dt over the last min(5, n)
+                     history samples and return the velocity in normalised units/s.
+        Purpose: Detect rapid downward motion as the primary fall trigger criterion.
+        Rationale: Using 5-sample finite difference is more noise-robust than a
+                   single-step delta while still being sensitive to fast drops.
+        Inputs:
+            None — reads self._centroid_z_history and self._timestamps.
+        Outputs:
+            float — vertical velocity (normalised units/s); negative = downward.
+        Preconditions:
+            At least 2 samples in self._centroid_z_history.
+        Postconditions:
+            Return value is 0.0 if fewer than 2 samples exist.
+        Assumptions:
+            History deques are appended synchronously with consistent timestamps.
+        Side Effects:
+            None — read-only.
+        Failure Modes:
+            dt < 1e-6 (duplicate timestamps): returns 0.0.
+        Error Handling:
+            n<2 guard; dt<1e-6 guard.
+        Constraints:
+            Uses at most 5 samples regardless of history depth.
+        Verification:
+            Unit test: inject 5 frames with linear Z drop; assert velocity < 0.
+        References:
+            Finite-difference velocity estimation; WR-ANALYSIS-FALL-001.
+        """
         hist = list(self._centroid_z_history)
         times = list(self._timestamps)
         n = min(5, len(hist))
@@ -229,7 +444,40 @@ class FallDetector:
         return dz / dt
 
     def _recovery_detected(self, centroid: np.ndarray, angle: float) -> bool:
-        """True when body has returned to near-standing height and angle for enough frames."""
+        """Return True when the body has been upright for self.recovery_frames frames.
+
+        ID: WR-ANALYSIS-FALL-RECOVERY-001
+        Requirement: Increment self._standing_frames when centroid Z and body angle
+                     satisfy near-standing criteria; reset on failure; return True
+                     when standing_frames >= recovery_frames.
+        Purpose: Prevent immediate state machine reset after a single upright frame,
+                 requiring sustained recovery before declaring the person safe.
+        Rationale: Requiring multiple consecutive upright frames avoids false
+                   recovery detection from transient upright postures during a fall.
+        Inputs:
+            centroid — (3,) float32: current normalised body centroid.
+            angle    — float: current torso-from-vertical angle in degrees.
+        Outputs:
+            bool — True only when standing_frames >= recovery_frames.
+        Preconditions:
+            self._standing_z must be calibrated (not None).
+        Postconditions:
+            self._standing_frames incremented or reset based on criteria.
+        Assumptions:
+            Called only while state is FALL_DETECTED or ALERT.
+        Side Effects:
+            Updates self._standing_frames.
+        Failure Modes:
+            standing_z is None: uses 0.0 as fallback; may give wrong z_ok result.
+        Error Handling:
+            None; assumes standing_z is set (caller guards with >= 20 frames).
+        Constraints:
+            recovery_frames must be > 0.
+        Verification:
+            Unit test: simulate N upright frames; assert True on frame N.
+        References:
+            WR-ANALYSIS-FALL-CLASS-001 state machine; self.recovery_frames.
+        """
         standing_z = self._standing_z or 0.0
         z_ok = centroid[2] > standing_z - abs(standing_z) * self.height_drop_frac * 0.5
         angle_ok = angle < self.angle_threshold_deg * 0.5
@@ -245,7 +493,40 @@ class FallDetector:
         centroid_after: np.ndarray,
         angle: float,
     ) -> FallEvent:
-        severity_labels = {
+        """Construct and return a FallEvent for the current state transition.
+
+        ID: WR-ANALYSIS-FALL-MKEVENT-001
+        Requirement: Build a FallEvent from the current state, centroids, and angle
+                     using self._state to select the severity and message.
+        Purpose: Centralise FallEvent construction so all callers in update() use
+                 a consistent format without duplicating field assignments.
+        Rationale: A dedicated factory method isolates FallEvent construction details
+                   from the state machine logic in update().
+        Inputs:
+            centroid_before — (3,) or tuple: position before the event.
+            centroid_after  — (3,) or tuple: position at event detection.
+            angle           — float: body angle at detection time (degrees).
+        Outputs:
+            FallEvent — fully populated event record with current timestamp.
+        Preconditions:
+            self._state must be one of POSSIBLE_FALL/FALL_DETECTED/ALERT.
+        Postconditions:
+            Returned FallEvent.severity matches self._state.
+        Assumptions:
+            centroid_before and centroid_after are 3-element sequences.
+        Side Effects:
+            Calls time.time() for the event timestamp.
+        Failure Modes:
+            Unknown severity: FallEvent.message defaults to empty string.
+        Error Handling:
+            dict.get() with default '' for unknown severity labels.
+        Constraints:
+            None.
+        Verification:
+            Unit test: set state=FALL_DETECTED; call _make_event; assert severity==FALL_DETECTED.
+        References:
+            FallEvent; FallSeverity; WR-ANALYSIS-FALL-001.
+        """
             FallSeverity.POSSIBLE_FALL: "Possible fall",
             FallSeverity.FALL_DETECTED: "Fall detected",
             FallSeverity.ALERT:         "ALERT — no recovery",

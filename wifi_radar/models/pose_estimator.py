@@ -2,15 +2,17 @@
 ID: WR-MODEL-POSE-001
 Requirement: Accept a CSI embedding from DualBranchEncoder and regress 3-D COCO-17
              keypoint coordinates and per-keypoint confidence scores.
-Purpose: Provides the primary human-pose output for downstream fall detection, gait
-         analysis, and dashboard visualisation.
-Architecture:
-    FC → Dropout → FC → (optional LSTM for temporal smoothing) → keypoint head + confidence head
+Purpose: Provides the primary human-pose output for downstream fall detection,
+         gait analysis, and dashboard visualisation.
+Rationale: A shared FC backbone feeding two specialised heads (keypoints + confidence)
+           is parameter-efficient and allows the confidence head to learn independently
+           of the coordinate regression objective.
 Assumptions:
-    - Input features are (batch_size, 256) embeddings from DualBranchEncoder.
-    - Keypoint coordinates are in normalised space [-1, 1] on each axis.
-    - Confidence scores are in [0, 1] (sigmoid output).
-References: COCO 17-point skeleton, OpenPose (CMU, 2019)
+    Input features are (batch_size, 256) embeddings from DualBranchEncoder.
+    Keypoint coordinates are in normalised space [-1, 1] on each axis.
+    Confidence scores are in [0, 1] (sigmoid output).
+Constraints: LSTM temporal smoothing requires >= 2 sequence frames to be useful.
+References: COCO 17-point skeleton, OpenPose (CMU, 2019).
 """
 import logging
 
@@ -23,29 +25,72 @@ import torch.nn.functional as F
 class PoseEstimator(nn.Module):
     """Single-person pose estimator with optional LSTM temporal smoothing.
 
-    Processes either a single feature vector (batch_size, input_dim) or a
-    sequence (batch_size, seq_len, input_dim).  In sequence mode an LSTM
-    provides temporal consistency across frames.
-
-    Args:
-        input_dim:      Feature vector size from DualBranchEncoder (default 256).
-        hidden_dim:     Width of the shared fully-connected backbone (default 512).
-        num_keypoints:  Number of output keypoints — COCO-17 by default.
-        output_dim:     Coordinate dimension per keypoint (3 for x/y/z; default 3).
+    ID: WR-MODEL-POSE-CLASS-001
+    Requirement: Map a (batch, input_dim) feature vector or (batch, seq, input_dim)
+                 sequence to COCO-17 keypoint coordinates and per-keypoint confidence.
+    Purpose: Decode the compact CSI embedding from DualBranchEncoder into a
+             structured human body pose usable by fall detection and gait analysis.
+    Rationale: A two-head architecture (coordinate regression + confidence scoring)
+               allows the model to express uncertainty per keypoint, enabling
+               downstream consumers to filter unreliable joints.
+    Inputs:
+        x      — float tensor: (batch, input_dim) or (batch, seq_len, input_dim).
+        hidden — Optional LSTM state tuple for stateful sequential inference.
+    Outputs:
+        Tuple (keypoints, confidence, hidden):
+          keypoints  — (batch, num_keypoints, output_dim) normalised 3-D coords.
+          confidence — (batch, num_keypoints) scores in [0, 1].
+          hidden     — updated LSTM state or None.
+    Preconditions:
+        Input feature dimension must match self.input_dim (default 256).
+    Postconditions:
+        confidence values are in [0, 1] (sigmoid applied).
+    Assumptions:
+        DualBranchEncoder output_dim matches this model's input_dim.
+    Constraints:
+        LSTM path requires seq_len >= 2 for temporal smoothing to be effective.
+    References:
+        COCO 17-point skeleton; OpenPose (CMU, 2019).
     """
 
     def __init__(self, input_dim=256, hidden_dim=512, num_keypoints=17, output_dim=3):
-        """Build all sub-modules.
+        """Build all sub-modules and initialise weights.
 
-        Args:
-            input_dim:      Embedding size produced by DualBranchEncoder.
-            hidden_dim:     Width of the two shared FC layers and LSTM hidden state.
-            num_keypoints:  Number of body keypoints to regress (COCO-17 default).
-            output_dim:     Spatial dimensions per keypoint (3 → x, y, z).
-
+        ID: WR-MODEL-POSE-INIT-001
+        Requirement: Construct all Linear, LSTM, and Dropout sub-modules and
+                     call initialize_weights() before the first forward pass.
+        Purpose: Fully prepare the pose estimator for training or inference without
+                 additional setup calls.
+        Rationale: Calling initialize_weights() in __init__ ensures the model is
+                   Kaiming-initialised even if the caller forgets to call it explicitly.
+        Inputs:
+            input_dim:      int >= 1: embedding size from DualBranchEncoder (default 256).
+            hidden_dim:     int >= 1: width of shared FC layers and LSTM hidden state.
+            num_keypoints:  int >= 1: body keypoints to regress (COCO-17 = 17).
+            output_dim:     int >= 1: spatial dimensions per keypoint (3 for x,y,z).
+        Outputs:
+            None — initialises self.
+        Preconditions:
+            PyTorch nn.Module parent __init__() must succeed.
+        Postconditions:
+            All sub-module tensors allocated; weights Kaiming-initialised.
+            self.input_dim, self.hidden_dim, self.num_keypoints, self.output_dim set.
+        Assumptions:
+            CPU allocation; caller moves model to target device after construction.
         Side Effects:
             Allocates Linear, LSTM, and Dropout parameter tensors on CPU.
-            Calls initialize_weights() immediately after construction.
+            Calls initialize_weights() immediately.
+        Failure Modes:
+            ValueError if any dimension argument <= 0.
+        Error Handling:
+            PyTorch raises ValueError for invalid layer dimensions.
+        Constraints:
+            LSTM batch_first=True; LSTM hidden_size == hidden_dim.
+        Verification:
+            Unit test: construct defaults; call forward on (1, 256) tensor;
+            assert keypoints shape (1, 17, 3) and confidence shape (1, 17).
+        References:
+            nn.Linear, nn.LSTM, nn.Dropout PyTorch documentation.
         """
         super(PoseEstimator, self).__init__()
         self.logger = logging.getLogger("PoseEstimator")
@@ -84,21 +129,46 @@ class PoseEstimator(nn.Module):
     def forward(self, x, hidden=None):
         """Regress keypoint positions and confidence scores from CSI features.
 
-        Args:
-            x:      Feature tensor.  Either:
-                      • (batch_size, input_dim)                  — single-frame mode, LSTM skipped.
-                      • (batch_size, sequence_length, input_dim) — sequential mode, LSTM applied.
-            hidden: Optional LSTM hidden state ``(h_n, c_n)`` for stateful inference.
-                    Pass ``None`` to reset the hidden state on each call.
-
-        Returns:
+        ID: WR-MODEL-POSE-FWD-001
+        Requirement: Accept a single-frame or sequential feature tensor and produce
+                     normalised 3-D keypoint coordinates and per-keypoint confidence.
+        Purpose: Decode the compact DualBranchEncoder embedding into a structured
+                 pose representation used by fall detection, gait analysis, and the
+                 RTMP visualiser.
+        Rationale: Single-frame path skips the LSTM for lower latency in real-time
+                   inference; sequential path applies LSTM for temporal consistency.
+        Inputs:
+            x      — float tensor:
+                       (batch, input_dim)                  — single-frame mode.
+                       (batch, sequence_length, input_dim) — sequential mode.
+            hidden — Optional LSTM state (h_n, c_n); None resets the hidden state.
+        Outputs:
             Tuple (keypoints, confidence, hidden):
-              keypoints:  (batch_size, num_keypoints, output_dim) — normalised 3-D coordinates.
-              confidence: (batch_size, num_keypoints)             — per-keypoint score in [0, 1].
-              hidden:     Updated LSTM state or ``None`` in single-frame mode.
-
+              keypoints  — (batch, num_keypoints, output_dim) normalised 3-D coords.
+              confidence — (batch, num_keypoints) scores in [0, 1].
+              hidden     — updated LSTM state or None in single-frame mode.
+        Preconditions:
+            x.shape[-1] must equal self.input_dim.
+            x must be on the same device as model parameters.
+        Postconditions:
+            confidence values are in [0, 1] (sigmoid applied).
+            keypoints has shape (batch, self.num_keypoints, self.output_dim).
+        Assumptions:
+            batch_size >= 1; single-sample inference (batch=1) is valid.
         Side Effects:
             None — pure functional forward pass.
+        Failure Modes:
+            RuntimeError if x.shape[-1] != self.input_dim.
+            Device mismatch raises RuntimeError from PyTorch.
+        Error Handling:
+            PyTorch raises descriptive RuntimeError on shape/device mismatches.
+        Constraints:
+            Dropout is active only during training (model.train() mode).
+        Verification:
+            Unit test: (batch=2, input_dim=256) tensor; assert output shapes
+            are (2,17,3) for keypoints and (2,17) for confidence.
+        References:
+            COCO-17 keypoint format; nn.LSTM batch_first=True convention.
         """
         batch_size = x.shape[0]
 
@@ -141,12 +211,34 @@ class PoseEstimator(nn.Module):
     def initialize_weights(self):
         """Apply Kaiming initialisation to all Linear layers.
 
-        fan_in mode is used here (vs. fan_out in the CNN encoder) because the
-        fully connected layers do not have a spatial fan-out component and the
-        activations are consumed by a downstream ReLU on the receiving side.
-
+        ID: WR-MODEL-POSE-INIT-WEIGHTS-001
+        Requirement: Set all Linear layer weights using Kaiming normal (fan_in)
+                     initialisation and zero-initialise all biases.
+        Purpose: Provide stable gradient flow at the start of training.
+        Rationale: fan_in mode is preferred for fully-connected layers (vs. fan_out
+                   used in CNN encoders) because FC layers lack a spatial fan-out.
+        Inputs:
+            None — operates on self.modules().
+        Outputs:
+            None — modifies parameter tensors in-place.
+        Preconditions:
+            All sub-modules must already be allocated (called after super().__init__()).
+        Postconditions:
+            All Linear weight tensors are Kaiming-normal (fan_in); biases are zero.
+        Assumptions:
+            All linear layers are followed by ReLU activations.
         Side Effects:
             Modifies all Linear weight and bias tensors in-place.
+        Failure Modes:
+            None expected; isinstance check handles all module types.
+        Error Handling:
+            Non-Linear sub-modules are silently skipped.
+        Constraints:
+            Must be called before training for reproducible initialisation.
+        Verification:
+            Unit test: call initialize_weights(); assert all Linear bias tensors are zero.
+        References:
+            He et al. (2015); nn.init.kaiming_normal_(mode='fan_in').
         """
         for m in self.modules():
             if isinstance(m, nn.Linear):
@@ -157,28 +249,42 @@ class PoseEstimator(nn.Module):
     def detect_people(self, keypoints, confidence, threshold=0.5):
         """Separate per-batch detections into a list of individual person dicts.
 
-        This is a simplified single-person heuristic used for the legacy code path.
-        For multi-person scenarios use ``MultiPersonPoseEstimator`` + ``MultiPersonTracker``.
-
-        Algorithm:
-            For each batch element, filter keypoints whose confidence exceeds
-            ``threshold``.  If at least 30 % of keypoints pass the filter the
-            person is considered detected and appended to the output list.
-
-        Args:
-            keypoints:  (batch_size, num_keypoints, output_dim) tensor.
-            confidence: (batch_size, num_keypoints) tensor.
-            threshold:  Confidence cutoff in [0, 1].  Keypoints below this are
-                        replaced with NaN in the output.
-
-        Returns:
-            List of dicts, one per batch element that passes the keypoint filter.
-            Each dict has keys:
-              ``keypoints``  — (num_keypoints, output_dim) numpy array (low-conf → NaN).
-              ``confidence`` — (num_keypoints,) numpy array.
-
+        ID: WR-MODEL-POSE-DETECT-001
+        Requirement: Filter a batch of keypoint tensors by confidence threshold and
+                     return a list of person dicts for downstream single-person consumers.
+        Purpose: Provide a simple single-person heuristic for the legacy code path;
+                 multi-person scenarios should use MultiPersonPoseEstimator instead.
+        Rationale: Filtering sub-threshold keypoints with NaN allows downstream
+                   consumers to detect unreliable joints without a separate boolean mask.
+        Inputs:
+            keypoints:  float tensor (batch_size, num_keypoints, output_dim).
+            confidence: float tensor (batch_size, num_keypoints) in [0, 1].
+            threshold:  float in (0, 1): confidence cutoff (default 0.5).
+        Outputs:
+            List of dicts, one per batch element passing the 30% keypoint filter.
+            Each dict: {'keypoints': (num_kp, output_dim) numpy, low-conf -> NaN;
+                        'confidence': (num_kp,) numpy array}.
+        Preconditions:
+            keypoints and confidence are tensors (not numpy); detach() is called.
+        Postconditions:
+            Returned keypoints have sub-threshold positions replaced with NaN.
+            Only batch elements with >30% valid keypoints are included.
+        Assumptions:
+            Single-person inference; for multi-person use MultiPersonPoseEstimator.
         Side Effects:
-            Detaches tensors and moves them to CPU; does not modify the originals.
+            Detaches tensors and moves them to CPU; originals are not modified.
+        Failure Modes:
+            Empty batch returns an empty list.
+            All-zero confidence returns empty list (nothing passes 30% filter).
+        Error Handling:
+            No exception handling; invalid input shapes raise PyTorch errors.
+        Constraints:
+            30% keypoint filter may be too lenient for high-noise CSI; tune threshold.
+        Verification:
+            Unit test: confidence=[1]*17 tensor; assert one person returned with
+            all keypoints non-NaN.
+        References:
+            COCO-17 keypoint visibility convention; np.nan masking pattern.
         """
         batch_size = keypoints.shape[0]
         people = []

@@ -29,9 +29,27 @@ from typing import List
 class HouseVisualizer:
     """Renders a top-down or perspective 3-D house view with pose overlays.
 
-    Requires ``pygame`` and an OpenGL-capable display.  When a display is
-    unavailable the class degrades gracefully and logs a warning instead of
-    raising an exception.
+    ID: WR-VIZ-HOUSE-CLASS-001
+    Requirement: Display detected person positions on a 2-D top-down floor plan
+                 rendered with pygame at a configured FPS.
+    Purpose: Give operators a room-level spatial overview of occupant locations
+             to complement the 3-D skeleton view in the Dash dashboard.
+    Rationale: Running the render loop in a daemon thread decouples the display
+               update rate from the inference pipeline throughput.
+    Inputs:
+        width, height — int: pygame window dimensions in pixels.
+        fps — int: target render frame rate.
+        wall_transparency — float [0,1]: alpha for floor-plan wall overlays.
+    Outputs:
+        Live pygame window with person position overlays.
+    Preconditions:
+        pygame must be installed and a display server must be available.
+    Assumptions:
+        Keypoint coordinates are normalised to [-1, 1] on each axis.
+    Constraints:
+        Degrades gracefully (no-op all methods) if pygame is not installed.
+    References:
+        pygame documentation; WR-VIZ-HOUSE-001 module docstring.
     """
 
     def __init__(
@@ -41,6 +59,43 @@ class HouseVisualizer:
         fps: int = 30,
         wall_transparency: float = 0.5,
     ) -> None:
+        """Initialise window parameters and attempt a lazy pygame import.
+
+        ID: WR-VIZ-HOUSE-INIT-001
+        Requirement: Store configuration, initialise threading primitives, and
+                     attempt a lazy import of pygame; set self._pygame_available
+                     accordingly.
+        Purpose: Allow HouseVisualizer to be constructed even on systems without
+                 a display, so the rest of the pipeline can run headlessly.
+        Rationale: Lazy import inside __init__ rather than module level lets
+                   tests and non-display environments import the class safely.
+        Inputs:
+            width              — int > 0: pygame window width in pixels.
+            height             — int > 0: pygame window height in pixels.
+            fps                — int > 0: target render frame rate.
+            wall_transparency  — float [0, 1]: wall overlay alpha.
+        Outputs:
+            None — initialises self.
+        Preconditions:
+            None — no display or network interaction.
+        Postconditions:
+            self._pygame_available == True iff pygame is importable.
+            self._running == False; self._people == [].
+        Assumptions:
+            Caller will call start() before the render loop is needed.
+        Side Effects:
+            Attempts `import pygame`; logs WARNING if unavailable.
+        Failure Modes:
+            pygame not installed: ImportError caught; self._pygame_available=False.
+        Error Handling:
+            ImportError silently handled; warning logged.
+        Constraints:
+            No threads or subprocesses are started at construction time.
+        Verification:
+            Unit test: construct without pygame installed; assert _pygame_available==False.
+        References:
+            pygame.init(); threading.Lock; WR-VIZ-HOUSE-CLASS-001.
+        """
         self.logger = logging.getLogger("HouseVisualizer")
         self.width = width
         self.height = height
@@ -70,20 +125,37 @@ class HouseVisualizer:
     def start(self) -> None:
         """Start the pygame render loop in a background daemon thread.
 
+        ID: WR-VIZ-HOUSE-START-001
+        Requirement: Set self._running=True and spawn a daemon thread targeting
+                     _render_loop() when pygame is available and not already running.
+        Purpose: Activate the display so operators see real-time position updates.
+        Rationale: Daemon thread ensures automatic cleanup when the main process exits
+                   without requiring an explicit stop() call.
+        Inputs:
+            None.
+        Outputs:
+            None.
         Preconditions:
-            ``self._pygame_available`` must be True (pygame installed and importable).
-            Must not be called while already running.
-
+            self._pygame_available == True.
+            self._running == False.
+        Postconditions:
+            self._running == True; self._thread is a live daemon thread.
+        Assumptions:
+            A display server (X11/Wayland/headless FB) is available.
         Side Effects:
-            Sets ``self._running = True``.
-            Spawns ``self._thread`` as a daemon thread targeting ``_render_loop()``.
-            The daemon flag ensures the thread is killed automatically if the main
-            process exits before ``stop()`` is called.
-
-        Thread Safety:
-            Only call from the main thread before starting the processing thread.
-            ``_running`` is a plain bool; no lock is used because ``start()`` and
-            ``stop()`` are only called from the main thread.
+            Sets self._running = True.
+            Spawns self._thread as a daemon thread.
+            Logs INFO message.
+        Failure Modes:
+            pygame not available: method returns immediately (no-op).
+        Error Handling:
+            Duplicate start(): returns immediately (no-op guard).
+        Constraints:
+            Only one render thread should be active at a time.
+        Verification:
+            Integration test: start(); sleep(0.1); assert _thread.is_alive().
+        References:
+            threading.Thread daemon=True; _render_loop().
         """
         if not self._pygame_available:
             return
@@ -97,10 +169,37 @@ class HouseVisualizer:
     def stop(self) -> None:
         """Signal the render loop to exit and wait for the thread to join.
 
+        ID: WR-VIZ-HOUSE-STOP-001
+        Requirement: Set self._running=False and join the render thread within
+                     a 2-second timeout.
+        Purpose: Ensure pygame is cleanly quit and the window is closed without
+                 leaving an orphaned thread after the pipeline shuts down.
+        Rationale: A 2-second timeout prevents indefinite blocking if pygame
+                   hangs on quit(); the daemon flag ensures forced cleanup on exit.
+        Inputs:
+            None.
+        Outputs:
+            None.
+        Preconditions:
+            start() must have been called (self._thread must exist).
+        Postconditions:
+            self._running == False; render thread has exited or timed out.
+        Assumptions:
+            pygame.quit() completes within 2 seconds under normal operation.
         Side Effects:
-            Sets ``self._running = False``.
-            Joins ``self._thread`` with a 2-second timeout so the caller is not
-            blocked indefinitely if pygame hangs on ``pygame.quit()``.
+            Sets self._running = False.
+            Joins self._thread with timeout=2.0 s.
+            Logs INFO message.
+        Failure Modes:
+            Thread hangs: join() times out after 2 s; thread becomes abandoned.
+        Error Handling:
+            None beyond the 2-second timeout.
+        Constraints:
+            Thread cleanup bounded to 2 s maximum wait.
+        Verification:
+            Integration test: start(); stop(); assert not _thread.is_alive() (within 2s).
+        References:
+            threading.Thread.join(timeout); pygame.quit().
         """
         self._running = False
         if self._thread:
@@ -110,19 +209,38 @@ class HouseVisualizer:
     def update_people(self, people: List[dict]) -> None:
         """Thread-safe replacement of the detected-people list for the next frame.
 
-        Called by the inference/processing thread after each forward pass.
-        Acquires ``self._lock`` before overwriting ``self._people`` so the
-        render thread never sees a partially-updated list.
-
-        Args:
-            people: List of person dicts, each containing at minimum:
-                      ``keypoints``  — (17, 3) numpy array of normalised 3-D coords.
-                      ``confidence`` — (17,) numpy array of per-keypoint scores.
-
-        Thread Safety:
-            This method is the ONLY external entry point that mutates
-            ``self._people``.  The render loop reads the same field under the
-            same lock, guaranteeing mutual exclusion.
+        ID: WR-VIZ-HOUSE-UPDATE-001
+        Requirement: Replace self._people with the provided list under self._lock
+                     so the render thread always sees a consistent snapshot.
+        Purpose: Allow the inference thread to publish updated occupant positions
+                 without blocking on the render thread.
+        Rationale: Holding self._lock only during the list assignment (not during
+                   rendering) minimises lock contention between producer and consumer.
+        Inputs:
+            people — List[dict]: each dict must contain:
+                'keypoints'  — (17,3) numpy float array, normalised [-1,1].
+                'confidence' — (17,) numpy float array, per-keypoint scores [0,1].
+        Outputs:
+            None — updates self._people as a side effect.
+        Preconditions:
+            None — safe to call before start().
+        Postconditions:
+            self._people is a new list containing the provided items.
+        Assumptions:
+            Render thread reads self._people under the same self._lock.
+        Side Effects:
+            Acquires self._lock.
+            Replaces self._people with list(people).
+        Failure Modes:
+            Invalid dict entries: render loop skips entries missing required keys.
+        Error Handling:
+            None at this level; defensive checks are in _draw_people.
+        Constraints:
+            Lock held only for the duration of list(people) and assignment.
+        Verification:
+            Unit test: set people=[{...}]; assert self._people == [{...}].
+        References:
+            threading.Lock; _draw_people(); WR-VIZ-HOUSE-CLASS-001.
         """
         with self._lock:
             self._people = list(people)
@@ -134,24 +252,39 @@ class HouseVisualizer:
     def _render_loop(self) -> None:
         """Pygame event-and-render loop running in the background daemon thread.
 
-        Loop structure (each iteration at ``self.fps``):
-            1. Drain the pygame event queue; exit on QUIT event.
-            2. Fill the screen with the background colour.
-            3. Acquire ``self._lock`` and call ``_draw_people()`` to render
-               the current snapshot without holding the lock during the full
-               draw cycle (only the list copy is protected).
-            4. Flip the display buffer.
-            5. ``clock.tick(fps)`` caps the frame rate and yields CPU time.
-
+        ID: WR-VIZ-HOUSE-LOOP-001
+        Requirement: Initialise pygame, run an event-pump+draw loop at self.fps,
+                     and call pygame.quit() in a finally block on exit.
+        Purpose: Maintain the live display window and render person positions at
+                 the configured frame rate until self._running is set False.
+        Rationale: The event pump (pygame.event.get) must run in the same thread
+                   that called pygame.init() to avoid display server race conditions.
+        Inputs:
+            None — reads self._running, self._people (via _draw_people), self.fps.
+        Outputs:
+            None — renders to the pygame window as a side effect.
+        Preconditions:
+            Called from start() as a daemon thread.
+            pygame must be installed.
+        Postconditions:
+            pygame.quit() is called in the finally block regardless of exit reason.
+        Assumptions:
+            A display server is available and pygame.init() succeeds.
         Side Effects:
-            Calls ``pygame.init()`` and ``pygame.quit()`` (in finally block)
-            inside the thread.  Any exception is caught and logged; pygame is
-            always quit to release the display resource.
-
-        Note:
-            Replace the body of this method with a full room-geometry render
-            (floor plan walls, router antenna positions, etc.) once the spatial
-            layout model is available.
+            Calls pygame.init() and pygame.display.set_mode().
+            Calls pygame.quit() in finally block.
+            Calls _draw_people() under self._lock on each iteration.
+        Failure Modes:
+            pygame.init() fails: exception caught, logged; pygame.quit() called.
+            Any render error: caught, logged; loop exits.
+        Error Handling:
+            Top-level except catches all exceptions; logs error; pygame.quit() called.
+        Constraints:
+            Frame rate capped by clock.tick(self.fps).
+        Verification:
+            Integration test: start(); sleep(0.5); assert window title matches config.
+        References:
+            pygame.event.get; pygame.display.flip; clock.tick.
         """
         import time
         import pygame
@@ -182,22 +315,39 @@ class HouseVisualizer:
     def _draw_people(self, screen) -> None:  # type: ignore[no-untyped-def]
         """Render each detected person as a circle at their projected 2-D position.
 
-        Algorithm:
-            For each person in ``self._people``:
-            1. Skip entries without ``keypoints`` or ``confidence``.
-            2. Select keypoints whose confidence exceeds 0.3 (valid mask).
-            3. Compute the mean X and Y of valid keypoints as the person's
-               centre of mass in normalised space [-1, 1].
-            4. Map the normalised centre of mass to screen pixels:
-               ``pixel = (norm + 1) / 2 \u00d7 dimension``.
-            5. Draw a filled circle at the screen position.
-
-        Thread Safety:
-            Must be called from inside the ``with self._lock`` block in
-            ``_render_loop()`` to ensure a consistent view of ``self._people``.
-
-        Args:
-            screen: Active ``pygame.Surface`` (the display window).
+        ID: WR-VIZ-HOUSE-DRAW-001
+        Requirement: For each person in self._people with at least one keypoint
+                     confidence > 0.3, compute a centre-of-mass screen position
+                     and render a filled circle at that location.
+        Purpose: Provide a simple but informative room-level view of occupant
+                 positions without requiring a full 3-D rendering pipeline.
+        Rationale: Mean of high-confidence keypoints is a robust centroid estimate
+                   that degrades gracefully when only a subset of keypoints is visible.
+        Inputs:
+            screen — pygame.Surface: the active display window surface.
+        Outputs:
+            None — draws to screen as a side effect.
+        Preconditions:
+            Must be called from inside `with self._lock` block in _render_loop().
+            pygame must be initialised.
+        Postconditions:
+            One filled circle per valid person is drawn on screen.
+        Assumptions:
+            Keypoint X and Y are normalised to [-1, 1].
+            pygame.draw.circle is available.
+        Side Effects:
+            Calls pygame.draw.circle for each valid person.
+        Failure Modes:
+            Person dict missing 'keypoints' or 'confidence': skipped.
+            No valid keypoints (all conf <= 0.3): person skipped.
+        Error Handling:
+            Defensive .get() checks for missing keys; valid.any() guard.
+        Constraints:
+            Called from the render loop; must be fast (<< 1/fps seconds).
+        Verification:
+            Unit test: mock screen; call with synthetic people; assert circle called.
+        References:
+            pygame.draw.circle; COCO-17 keypoints; normalised coordinate system.
         """
         import pygame
 

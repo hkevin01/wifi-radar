@@ -25,24 +25,67 @@ import numpy as np
 class CSICollector:
     """Collects Channel State Information (CSI) from a WiFi router or simulation.
 
-    The collector runs a background daemon thread that continuously pushes
-    (amplitude, phase) array pairs into a bounded queue.  Callers consume frames
-    via ``get_csi_data()`` without needing to manage the thread directly.
+    ID: WR-DATA-CSI-CLASS-001
+    Requirement: Provide a thread-safe queue of (amplitude, phase) CSI frames
+                 at approximately 20 Hz regardless of whether the data source is
+                 a real router or the built-in Rayleigh-fading simulator.
+    Purpose: Abstract the CSI data source behind a uniform queue interface so
+             downstream signal processing is source-agnostic.
+    Rationale: A bounded queue decouples production rate from consumption rate;
+               daemon thread ensures clean shutdown without explicit lifecycle calls.
+    Inputs:
+        router_ip   — str: IPv4 address of the router (simulation mode ignores this).
+        port        — int: TCP port for CSI firmware streaming.
+        buffer_size — int >= 1: maximum buffered frames before oldest are dropped.
+    Outputs:
+        (amplitude, phase) tuples via get_csi_data() at ~20 Hz.
+    Preconditions:
+        call start() before get_csi_data().
+    Postconditions:
+        After stop(), the collection thread has exited within 1 second.
+    Assumptions:
+        3x3 MIMO, 64 OFDM subcarriers (configurable via constructor attributes).
+    Constraints:
+        Queue is bounded; frames are silently dropped when full.
+    References:
+        Wi-Fi 802.11n CSI Tool; Rayleigh fading channel model.
     """
 
     def __init__(self, router_ip="192.168.1.1", port=5500, buffer_size=100):
         """Initialise collector parameters and the internal frame queue.
 
-        Args:
-            router_ip:   IPv4 address of the router running the CSI firmware.
-                         Ignored in simulation mode.
-            port:        TCP port the router firmware listens on.
-            buffer_size: Maximum number of unread frames to buffer.
-                         Older frames are silently discarded when the queue is full.
-
+        ID: WR-DATA-CSI-INIT-001
+        Requirement: Create all instance attributes and the bounded frame queue
+                     without starting any background threads.
+        Purpose: Allow the caller to configure the collector before starting
+                 collection, separating construction from activation.
+        Rationale: Deferred start() lets the main thread set sim_num_people and
+                   other attributes before the background thread begins running.
+        Inputs:
+            router_ip:   str: IPv4 address of the router firmware (ignored in sim mode).
+            port:        int in [1, 65535]: TCP port for CSI data streaming.
+            buffer_size: int >= 1: maximum buffered (amplitude, phase) frames.
+        Outputs:
+            None — initialises self.
+        Preconditions:
+            None — no network connections are made.
+        Postconditions:
+            self.csi_data_queue is a Queue(maxsize=buffer_size).
+            self.running == False; no threads started.
+        Assumptions:
+            Queue module and threading module are available in the standard library.
         Side Effects:
-            Creates a thread-safe Queue but does not start any thread.
-            Call ``start()`` to begin collection.
+            Creates threading.Queue object.
+        Failure Modes:
+            ValueError if buffer_size < 1 (Queue raises).
+        Error Handling:
+            Queue constructor raises ValueError for invalid maxsize.
+        Constraints:
+            Buffer size should be tuned to the processing thread's consumption rate.
+        Verification:
+            Unit test: construct with defaults; assert queue.maxsize == 100.
+        References:
+            queue.Queue Python standard library; threading module.
         """
         self.router_ip = router_ip
         self.port = port
@@ -62,14 +105,38 @@ class CSICollector:
     def start(self, simulation_mode=True):
         """Start CSI data collection in a background daemon thread.
 
-        Args:
-            simulation_mode: If True, generate synthetic CSI frames locally.
-                             If False, connect to the router at ``router_ip:port``.
-
+        ID: WR-DATA-CSI-START-001
+        Requirement: Set self.running to True and spawn a daemon thread that
+                     writes (amplitude, phase) frames into self.csi_data_queue.
+        Purpose: Begin producing CSI frames so downstream consumers can call
+                 get_csi_data() and receive data immediately.
+        Rationale: Daemon thread ensures automatic cleanup on main-process exit
+                   even if stop() is never called.
+        Inputs:
+            simulation_mode — bool: True = synthetic Rayleigh frames; False = real router.
+        Outputs:
+            None.
+        Preconditions:
+            self.running must be False (not already started).
+        Postconditions:
+            self.running == True.
+            self.collection_thread is a live daemon thread.
+        Assumptions:
+            If simulation_mode=False, the router is reachable at router_ip:port.
         Side Effects:
-            Sets ``self.running = True``.
-            Spawns a daemon thread (``self.collection_thread``) that writes to
-            ``self.csi_data_queue`` until ``stop()`` is called.
+            Sets self.simulation_mode.
+            Spawns self.collection_thread as a daemon thread.
+        Failure Modes:
+            Real-router mode: socket.connect() may fail if router is unreachable;
+            the thread logs the error and exits.
+        Error Handling:
+            Network errors in the collection thread are caught and logged.
+        Constraints:
+            Only one collection thread should run at a time.
+        Verification:
+            Unit test (simulation mode): start(); sleep(0.2); assert queue.qsize() > 0.
+        References:
+            threading.Thread daemon flag; _simulate_csi_data(), _collect_csi_data().
         """
         self.simulation_mode = simulation_mode
         self.running = True
@@ -91,9 +158,40 @@ class CSICollector:
     def stop(self):
         """Signal the collection thread to exit and wait up to 1 s for it to join.
 
+        ID: WR-DATA-CSI-STOP-001
+        Requirement: Set self.running to False and join the collection thread
+                     with a 1-second timeout.
+        Purpose: Provide a clean shutdown so the thread releases its socket
+                 or simulation resources before the process exits.
+        Rationale: A 1-second timeout prevents the main thread from blocking
+                   indefinitely if the collection thread hangs.
+        Inputs:
+            None.
+        Outputs:
+            None.
+        Preconditions:
+            start() must have been called; self.collection_thread must exist.
+        Postconditions:
+            self.running == False.
+            self.collection_thread is joined (or timed out).
+        Assumptions:
+            Collection thread checks self.running in its loop and exits promptly.
         Side Effects:
-            Sets ``self.running = False``.
-            Joins ``self.collection_thread`` with a 1-second timeout.
+            Sets self.running = False.
+            Calls self.collection_thread.join(timeout=1.0).
+            Logs INFO message.
+        Failure Modes:
+            Thread may not exit within 1 second if blocked on a system call;
+            join returns but thread may still be alive.
+        Error Handling:
+            No exception handling; hasattr guard prevents AttributeError if thread
+            was never created.
+        Constraints:
+            Timeout is fixed at 1.0 second; adjust if the router has higher latency.
+        Verification:
+            Unit test: start(); stop(); assert self.running == False.
+        References:
+            threading.Thread.join(timeout); daemon thread cleanup.
         """
         self.running = False
         if hasattr(self, "collection_thread"):
@@ -103,18 +201,38 @@ class CSICollector:
     def get_csi_data(self, block=True, timeout=None):
         """Dequeue the next available CSI frame.
 
-        Args:
-            block:   If True, block until a frame is available or ``timeout`` expires.
-            timeout: Maximum seconds to wait when ``block=True``.  None = wait forever.
-
-        Returns:
-            Tuple (amplitude, phase):
-              amplitude — (num_tx, num_rx, num_subcarriers) float64 array.
-              phase     — (num_tx, num_rx, num_subcarriers) float64 array.
-            Returns ``None`` on queue timeout or error.
-
+        ID: WR-DATA-CSI-GET-001
+        Requirement: Return the next (amplitude, phase) tuple from the queue,
+                     blocking or non-blocking based on parameters.
+        Purpose: Provide the primary consumer interface for retrieving CSI frames
+                 from the background collection thread.
+        Rationale: Wrapping Queue.get() in a try/except returns None on timeout
+                   instead of raising, simplifying consumer loop logic.
+        Inputs:
+            block   — bool: if True, block until a frame is available.
+            timeout — Optional[float]: seconds to wait when block=True; None = forever.
+        Outputs:
+            Tuple (amplitude, phase) where each is (num_tx, num_rx, num_sub) float64,
+            or None on timeout or exception.
+        Preconditions:
+            start() must have been called; queue must be populated.
+        Postconditions:
+            One item removed from self.csi_data_queue.
+        Assumptions:
+            Consumer thread calls this at approximately the same rate as production.
         Side Effects:
-            Removes one item from ``self.csi_data_queue``.
+            Removes one item from self.csi_data_queue.
+        Failure Modes:
+            queue.Empty on timeout returns None (no exception propagated).
+        Error Handling:
+            All exceptions caught, logged, and None returned.
+        Constraints:
+            If timeout is too short, None may be returned during startup before
+            the queue is populated.
+        Verification:
+            Unit test: start(sim=True); sleep(0.1); assert get_csi_data() is not None.
+        References:
+            queue.Queue.get() Python standard library.
         """
         try:
             return self.csi_data_queue.get(block=block, timeout=timeout)
@@ -125,14 +243,36 @@ class CSICollector:
     def _collect_csi_data(self):
         """Connect to the router over TCP and stream real CSI frames into the queue.
 
-        Runs in the background collection thread.  The actual frame-parsing logic
-        in ``_parse_csi_data()`` is firmware-specific and must be implemented for
-        the target router platform (e.g. Atheros/OpenWRT).
-
+        ID: WR-DATA-CSI-COLLECT-001
+        Requirement: Open a TCP socket to (router_ip, port), receive raw packets,
+                     parse them with _parse_csi_data(), and push frames to the queue.
+        Purpose: Drive real-hardware CSI data collection in the background thread.
+        Rationale: Running in a separate daemon thread isolates network blocking
+                   calls from the inference pipeline.
+        Inputs:
+            None — reads self.router_ip, self.port, self.running.
+        Outputs:
+            None — side effect: writes to self.csi_data_queue.
+        Preconditions:
+            self.running == True; router is reachable at router_ip:port.
+        Postconditions:
+            Socket is closed in the finally block.
+        Assumptions:
+            Maximum useful CSI payload for 3x3 MIMO / 64 subcarriers < 8 KiB.
         Side Effects:
-            Opens a TCP socket to ``(self.router_ip, self.port)``.
-            Writes decoded frames to ``self.csi_data_queue``.
-            Closes the socket on thread exit (normal or exception).
+            Opens a TCP socket; writes decoded frames to self.csi_data_queue.
+            Closes the socket on exit (normal or exception).
+        Failure Modes:
+            socket.connect() raises if router is unreachable — caught and logged.
+            recv() returns empty bytes if connection is closed — loop skips frame.
+        Error Handling:
+            Top-level except catches all exceptions; logs error; finally closes socket.
+        Constraints:
+            Frame dropping: queue.full() check silently discards frames when buffer full.
+        Verification:
+            Integration test with a mock TCP server sending CSI packets.
+        References:
+            socket.SOCK_STREAM; _parse_csi_data() placeholder in this class.
         """
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -158,20 +298,35 @@ class CSICollector:
     def _simulate_csi_data(self):
         """Generate synthetic CSI frames at 20 Hz and push them into the queue.
 
-        Algorithm:
-            1. Draw a background Rayleigh-fading amplitude and uniform-random phase.
-            2. Compute independent Lissajous-trajectory positions for each simulated
-               person so their movement patterns do not overlap.
-            3. Delegate to ``_add_simulated_human_presence()`` to modulate the
-               background CSI with realistic person-induced multipath perturbations.
-
-        The Lissajous trajectories use different frequency ratios per person
-        (0.5 Hz / 0.3 Hz x-axis, shifted by a per-person phase offset) so each
-        person traces a distinct elliptical path through the measurement space.
-
+        ID: WR-DATA-CSI-SIM-001
+        Requirement: Produce plausible (amplitude, phase) arrays at ~20 Hz using
+                     Rayleigh fading background with Lissajous-trajectory human effects.
+        Purpose: Enable full system testing without real router hardware.
+        Rationale: Lissajous trajectories with per-person phase offsets produce
+                   independent, non-overlapping movement patterns for up to 4 people.
+        Inputs:
+            None — reads self.running, self.sim_num_people (default 1).
+        Outputs:
+            None — side effect: writes to self.csi_data_queue at ~20 Hz.
+        Preconditions:
+            self.running == True.
+        Postconditions:
+            Queue receives one frame per 50 ms (20 Hz) while running.
+        Assumptions:
+            sim_num_people attribute set on self before start() is called.
         Side Effects:
-            Writes (amplitude, phase) tuples to ``self.csi_data_queue`` at ~20 Hz.
-            Reads ``self.sim_num_people`` attribute (set by main.py before start()).
+            Writes (amplitude, phase) tuples to self.csi_data_queue.
+            Calls time.sleep(0.05) per iteration.
+        Failure Modes:
+            Queue full: frame is silently dropped (checked with queue.full()).
+        Error Handling:
+            No exception handling inside the loop; thread exits when self.running=False.
+        Constraints:
+            Simulation accuracy is sufficient for integration testing only.
+        Verification:
+            Unit test: start(sim=True, num_people=2); assert >10 frames in 1 second.
+        References:
+            Rayleigh fading: np.random.rayleigh; Lissajous figures.
         """
         person_count = getattr(self, "sim_num_people", 1)
         while self.running:
@@ -205,16 +360,36 @@ class CSICollector:
     def _parse_csi_data(self, raw_data):
         """Parse raw bytes received from the router firmware into amplitude/phase arrays.
 
-        This is a **placeholder** implementation.  The exact byte layout depends on
-        the router chipset and firmware (e.g. Atheros ath9k, Intel IWL5300, Nexmon).
-        Replace this body with the appropriate struct unpacking once the target
-        hardware is known.
-
-        Args:
-            raw_data: Raw bytes received from the router TCP socket.
-
-        Returns:
-            Tuple (amplitude, phase), each (num_tx, num_rx, num_subcarriers) float64.
+        ID: WR-DATA-CSI-PARSE-001
+        Requirement: Convert a raw byte buffer from the router TCP stream into
+                     (amplitude, phase) float64 arrays of shape (num_tx, num_rx, num_sub).
+        Purpose: Isolate firmware-specific byte-layout parsing from the collection loop.
+        Rationale: A placeholder implementation returning zeros is safe as a fallback;
+                   real parsing must be implemented per target router chipset.
+        Inputs:
+            raw_data — bytes: raw packet received from the router TCP socket.
+        Outputs:
+            Tuple (amplitude, phase), each (num_tx, num_rx, num_sub) float64.
+        Preconditions:
+            raw_data is a non-empty bytes object.
+        Postconditions:
+            Returns arrays of the correct shape regardless of raw_data content.
+        Assumptions:
+            PLACEHOLDER: current implementation returns zeros; real parsing needed
+            for Atheros/Intel IWL5300/Nexmon firmware.
+        Side Effects:
+            None — pure function.
+        Failure Modes:
+            Malformed packets: current implementation ignores content, returns zeros.
+        Error Handling:
+            No exception handling; struct.unpack errors should be caught when implementing.
+        Constraints:
+            Must be replaced with chipset-specific struct unpacking before real deployment.
+        Verification:
+            Integration test: send known CSI packet bytes; assert parsed arrays match
+            expected amplitude and phase values.
+        References:
+            Linux 802.11n CSI Tool; Nexmon CSI extraction; struct module.
         """
         # Return zero arrays as a safe no-op placeholder.
         amplitude = np.zeros((self.num_tx, self.num_rx, self.num_subcarriers))
@@ -224,26 +399,40 @@ class CSICollector:
     def _add_simulated_human_presence(self, amplitude, phase, people=None):
         """Modulate background CSI arrays in-place to simulate human multipath effects.
 
-        Physical model:
-            A person at normalised position (x_pos, y_pos) attenuates and phase-shifts
-            the signal on TX-RX antenna pairs whose spatial indices are close to the
-            person's position.  The effect is modelled as a Gaussian blob in the TX × RX
-            index space multiplied by a sinusoidal subcarrier factor that mimics
-            frequency-selective fading.
-
-        Vectorised implementation:
-            Broadcasting over (tx, 1, 1), (1, rx, 1), and (1, 1, sc) index arrays
-            allows the effect to be computed for all antenna pairs and subcarriers
-            in a single pass rather than a triple nested loop.
-
-        Args:
-            amplitude: (num_tx, num_rx, num_subcarriers) array — modified in-place.
-            phase:     (num_tx, num_rx, num_subcarriers) array — modified in-place.
-            people:    List of (x_pos, y_pos) tuples in [0, 1].  If None, one
-                       person is placed using the current wall-clock time.
-
+        ID: WR-DATA-CSI-HUM-001
+        Requirement: Modify amplitude and phase arrays in-place to add person-induced
+                     multipath effects modelled as Gaussian spatial blobs.
+        Purpose: Create realistic-looking synthetic CSI data for training and integration
+                 testing without real hardware.
+        Rationale: Gaussian proximity model captures signal attenuation near a person;
+                   sinusoidal subcarrier factor mimics frequency-selective fading from
+                   multipath reflections.
+        Inputs:
+            amplitude — (num_tx, num_rx, num_sub) float64 array: modified in-place.
+            phase     — (num_tx, num_rx, num_sub) float64 array: modified in-place.
+            people    — Optional[List[Tuple[float,float]]]: (x_pos, y_pos) in [0,1].
+                        If None, one person placed at current time-based Lissajous pos.
+        Outputs:
+            None — modifies amplitude and phase in-place.
+        Preconditions:
+            amplitude and phase have shape (num_tx, num_rx, num_sub).
+        Postconditions:
+            amplitude and phase contain person-induced multipath modulation.
+        Assumptions:
+            x_pos and y_pos are clipped to [0.05, 0.95] for stability.
         Side Effects:
-            Both ``amplitude`` and ``phase`` are modified in-place.
+            Modifies amplitude and phase arrays in-place.
+        Failure Modes:
+            Out-of-range positions are handled by Gaussian decay naturally.
+        Error Handling:
+            No exception handling; numpy operations propagate errors.
+        Constraints:
+            Vectorised over all antenna pairs and subcarriers in a single pass.
+        Verification:
+            Unit test: apply with one person at (0.5, 0.5); assert amplitude differs
+            from Rayleigh baseline near the centre antenna pairs.
+        References:
+            Rayleigh fading Gaussian model; sinusoidal subcarrier factor approximation.
         """
         if people is None:
             t = time.time()

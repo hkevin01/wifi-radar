@@ -25,7 +25,32 @@ from dash.dependencies import Input, Output, State
 
 
 class Dashboard:
-    """Real-time dashboard for WiFi-based pose estimation."""
+    """Real-time Dash/Plotly dashboard for WiFi-based pose estimation.
+
+    ID: WR-VIZ-DASH-CLASS-001
+    Requirement: Serve a Dash web application with three tabs (Monitor, Events,
+                 Configuration) that update in real-time from inference thread data.
+    Purpose: Provide operators with a browser-based interface to observe live pose
+             output, review fall/gait events, and adjust system configuration
+             without restarting the pipeline.
+    Rationale: Dash callbacks with dcc.Interval provide a push-free polling model
+               that avoids WebSocket complexity while still refreshing at 10 Hz.
+    Inputs:
+        update_interval_ms — int: fast-update interval in milliseconds.
+        max_history        — int: rolling buffer depth for sparkline charts.
+        config             — Optional[Dict]: initial configuration values.
+        config_path        — Optional[str]: YAML file path for persistent config.
+    Outputs:
+        A running Dash HTTP server accessible at http://localhost:port/.
+    Preconditions:
+        dash, dash-bootstrap-components, plotly must be installed.
+    Assumptions:
+        Inference thread calls update_data() and update_events() concurrently.
+    Constraints:
+        data_lock and _events_lock must be held for all shared state access.
+    References:
+        Dash documentation; WR-VIZ-DASH-001 module docstring.
+    """
 
     def __init__(
         self,
@@ -34,7 +59,43 @@ class Dashboard:
         config: Optional[Dict[str, Any]] = None,
         config_path: Optional[str] = None,
     ) -> None:
-        self.logger = logging.getLogger("Dashboard")
+        """Initialise the Dash application, layout, and all shared state.
+
+        ID: WR-VIZ-DASH-INIT-001
+        Requirement: Create the Dash app instance, call _setup_layout() and
+                     _setup_callbacks(), and initialise all thread-safety
+                     primitives and data buffers.
+        Purpose: Produce a fully configured but not yet running Dash app so
+                 the caller can start it at the appropriate point in the lifecycle.
+        Rationale: Separating construction from run() allows main.py to start all
+                   subsystems before the dashboard server starts consuming the port.
+        Inputs:
+            update_interval_ms — int > 0: fast-update poll interval in ms.
+            max_history        — int > 0: rolling history depth for sparklines.
+            config             — Optional[Dict]: initial config dict.
+            config_path        — Optional[str]: path to YAML config file.
+        Outputs:
+            None — initialises self.
+        Preconditions:
+            None.
+        Postconditions:
+            self.app is a configured Dash instance.
+            self.data_lock and self._events_lock are threading.Lock objects.
+        Assumptions:
+            run() is called after all subsystems are started.
+        Side Effects:
+            Creates a Dash app; calls _setup_layout() and _setup_callbacks().
+        Failure Modes:
+            Missing Dash dependencies: ImportError at module load time.
+        Error Handling:
+            None at construction; Dash validates component props at runtime.
+        Constraints:
+            suppress_callback_exceptions=True required for dynamic tab content.
+        Verification:
+            Unit test: construct; assert self.app is not None.
+        References:
+            dash.Dash; dbc.themes.DARKLY; WR-VIZ-DASH-CLASS-001.
+        """
         self.update_interval_ms = update_interval_ms
         self.max_history = max_history
         self._config = config or {}
@@ -74,19 +135,41 @@ class Dashboard:
     # ═══════════════════════════════════════════════════════════════════════ #
 
     def _setup_layout(self) -> None:
-        """Build the top-level Dash layout and assign it to ``self.app.layout``.
+        """Build the top-level Dash layout and assign it to self.app.layout.
 
-        Structure:
-            - Header row: app title + subtitle.
-            - ``dcc.Tabs`` with three tabs (Monitor / Events / Configuration).
-            - ``html.Div#tab-content`` populated by the ``render_tab`` callback.
-            - Two ``dcc.Interval`` timers:
-                ``fast-interval`` (``update_interval_ms`` ms) drives live data updates.
-                ``slow-interval`` (2 000 ms) drives the events panel.
-            - ``dcc.Store#config-save-result`` for inter-callback state passing.
-
+        ID: WR-VIZ-DASH-LAYOUT-001
+        Requirement: Construct a dbc.Container with header, tab selector,
+                     tab content div, two dcc.Interval timers, and a
+                     dcc.Store for config save feedback; assign to app.layout.
+        Purpose: Define the complete page structure once at startup so all
+                 callbacks can reference component IDs by string without
+                 the components being created lazily.
+        Rationale: Top-level layout with a content div populated by the
+                   render_tab callback enables tab isolation without loading
+                   all three tab layouts simultaneously.
+        Inputs:
+            None — reads self.update_interval_ms.
+        Outputs:
+            None — sets self.app.layout.
+        Preconditions:
+            self.app must be a fully initialised Dash instance.
+        Postconditions:
+            self.app.layout is a dbc.Container with all required component IDs.
+        Assumptions:
+            dbc.themes.DARKLY is available.
         Side Effects:
-            Sets ``self.app.layout`` (mutates the Dash application).
+            Mutates self.app.layout.
+        Failure Modes:
+            Missing component IDs: Dash raises dash.exceptions.NonExistentIdException
+            when callbacks reference them.
+        Error Handling:
+            None required; layout is statically defined.
+        Constraints:
+            fast-interval: update_interval_ms; slow-interval: 2000 ms.
+        Verification:
+            Smoke test: app.layout is not None after __init__().
+        References:
+            dbc.Container; dcc.Tabs; dcc.Interval; dcc.Store; WR-VIZ-DASH-001.
         """
         self.app.layout = dbc.Container(
             [
@@ -122,18 +205,34 @@ class Dashboard:
     # ── Tab content builders ─────────────────────────────────────────────── #
 
     def _monitor_tab(self) -> html.Div:
-        """Build the Live Monitor tab layout.
+        """Build the Live Monitor tab layout with pose graph and stats sidebar.
 
-        Contains:
-            - An 8-column ``dcc.Graph#pose-graph`` showing the live 3-D skeleton.
-            - A 4-column sidebar with:
-                ``people-counter`` — headline count of detected people.
-                ``confidence-graph`` — rolling confidence + people-count sparkline.
-                ``system-status``   — running/no-data text indicator.
-                ``csi-graph``       — raw CSI amplitude and phase for TX0·RX0.
-
-        Returns:
-            ``html.Div`` subtree for the monitor tab.
+        ID: WR-VIZ-DASH-MONTAB-001
+        Requirement: Return an html.Div containing a pose-graph card (width=8) and
+                     a stats sidebar (width=4) with people-counter, confidence-graph,
+                     system-status, and csi-graph component IDs.
+        Purpose: Provide the live operator view showing 3-D skeleton, detection
+                 confidence trend, and raw CSI signal quality side-by-side.
+        Rationale: An 8/4 column split maximises the 3-D pose graph while keeping
+                   the stats sidebar visible without scrolling.
+        Inputs:
+            None.
+        Outputs:
+            html.Div — complete monitor tab layout subtree.
+        Preconditions:
+            self._empty_pose_fig(), self._empty_confidence_fig(),
+            self._empty_csi_fig() must be callable.
+        Postconditions:
+            Returned layout contains component IDs: pose-graph, people-counter,
+            confidence-graph, system-status, csi-graph.
+        Side Effects:
+            None.
+        Failure Modes:
+            Missing component IDs: callbacks referencing them will fail at runtime.
+        Verification:
+            Smoke test: call _monitor_tab(); assert isinstance(result, html.Div).
+        References:
+            dcc.Graph; dbc.Card; WR-VIZ-DASH-001.
         """
         return html.Div([
             dbc.Row([
@@ -181,16 +280,31 @@ class Dashboard:
         ])
 
     def _events_tab(self) -> html.Div:
-        """Build the Events tab layout.
+        """Build the Events tab layout with fall alerts and gait metrics panel.
 
-        Contains:
-            - Left column ``fall-events-list``: scrollable list of fall alerts,
-              populated by the ``update_events`` callback every 2 seconds.
-            - Right column ``gait-metrics-panel``: table of current gait metrics
-              (cadence, stride length, step symmetry, speed, step count, window).
-
-        Returns:
-            ``html.Div`` subtree for the events tab.
+        ID: WR-VIZ-DASH-EVTTAB-001
+        Requirement: Return an html.Div containing fall-events-list (width=6)
+                     and gait-metrics-panel (width=6) component IDs.
+        Purpose: Provide operators with a chronological view of fall alerts and
+                 current gait analysis metrics for clinical review.
+        Rationale: A 50/50 column split gives equal prominence to fall detection
+                   and gait analysis, both being primary clinical outputs.
+        Inputs:
+            None.
+        Outputs:
+            html.Div — complete events tab layout subtree.
+        Preconditions:
+            None.
+        Postconditions:
+            Returned layout contains: fall-events-list, gait-metrics-panel IDs.
+        Side Effects:
+            None.
+        Failure Modes:
+            Missing component IDs referenced by update_events callback.
+        Verification:
+            Smoke test: call _events_tab(); assert isinstance(result, html.Div).
+        References:
+            dbc.Alert; dbc.Table; WR-VIZ-DASH-001.
         """
         return html.Div([
             dbc.Row([
@@ -218,19 +332,33 @@ class Dashboard:
     def _config_tab(self) -> html.Div:
         """Build the Configuration tab layout with live-editable settings.
 
-        Sections:
-            - Router / Source: IP, port, simulation toggle.
-            - Detection Settings: confidence threshold slider, max-people input.
-            - RTMP Streaming: URL and FPS.
-            - Fall Detection: enable toggle, velocity threshold slider,
-              angle threshold slider.
-            - Save button + feedback alert + restart-required notice.
-
-        All input widgets are pre-populated from ``self._config`` so the UI
-        reflects the currently active configuration on first render.
-
-        Returns:
-            ``html.Div`` subtree for the configuration tab.
+        ID: WR-VIZ-DASH-CFGTAB-001
+        Requirement: Return an html.Div containing form inputs for Router IP/Port,
+                     simulation toggle, confidence threshold, max-people, RTMP URL,
+                     stream FPS, fall detection enable/thresholds, and a save button.
+        Purpose: Allow operators to adjust system parameters at runtime without
+                 editing YAML files or restarting the application.
+        Rationale: Pre-populating inputs from self._config ensures the UI always
+                   reflects the currently active configuration on first render.
+        Inputs:
+            None — reads self._config for initial widget values.
+        Outputs:
+            html.Div — complete configuration tab layout subtree.
+        Preconditions:
+            None.
+        Postconditions:
+            Returned layout contains all cfg-* component IDs required by
+            save_config callback State declarations.
+        Side Effects:
+            None.
+        Failure Modes:
+            Missing cfg-* IDs: save_config callback will raise at runtime.
+        Constraints:
+            All input IDs must match State() arguments in save_config callback.
+        Verification:
+            Smoke test: call _config_tab(); assert isinstance(result, html.Div).
+        References:
+            dbc.Input; dcc.Slider; dbc.Switch; dbc.Button; WR-VIZ-DASH-001.
         """
         cfg = self._config
         router  = cfg.get("router", {})
@@ -352,22 +480,41 @@ class Dashboard:
     # ═══════════════════════════════════════════════════════════════════════ #
 
     def _setup_callbacks(self) -> None:
-        """Register all Dash reactive callbacks with ``self.app``.
+        """Register all Dash reactive callbacks with self.app.
 
-        Callbacks registered:
-            ``render_tab``        — routes tab value to the correct layout builder.
-            ``update_monitor``    — fast-interval: updates pose/CSI/confidence figures
-                                    and the people counter and system status string.
-            ``update_events``     — slow-interval: refreshes the fall-events list and
-                                    gait-metrics table.
-            ``update_conf_label`` — live label for the confidence-threshold slider.
-            ``update_vel_label``  — live label for the velocity-threshold slider.
-            ``update_angle_label``— live label for the angle-threshold slider.
-            ``save_config``       — serialises form values to YAML and invokes
-                                    ``self._on_config_change`` if registered.
-
+        ID: WR-VIZ-DASH-CALLBACKS-001
+        Requirement: Register render_tab, update_monitor, update_events,
+                     update_conf_label, update_vel_label, update_angle_label,
+                     and save_config callbacks with self.app.
+        Purpose: Wire all Dash Input/Output/State bindings so the browser UI
+                 reacts to user interaction and interval ticks.
+        Rationale: Registering all callbacks from one method keeps them in one
+                   place for auditing; inner-function closures provide access to
+                   self without requiring a Dash server context variable.
+        Inputs:
+            None — operates on self.app.
+        Outputs:
+            None — mutates self.app as a side effect.
+        Preconditions:
+            _setup_layout() must have been called first (component IDs must exist).
+        Postconditions:
+            self.app has 7 registered callbacks.
+        Assumptions:
+            suppress_callback_exceptions=True is set (required for dynamic tabs).
         Side Effects:
-            Mutates ``self.app`` by registering Dash Input/Output/State bindings.
+            Mutates self.app by calling app.callback() decorators.
+        Failure Modes:
+            Duplicate callback IDs: Dash raises DuplicateCallbackOutput error.
+        Error Handling:
+            None; Dash raises on misconfiguration at import time.
+        Constraints:
+            Inner callbacks capture self via closure; must not be called
+            from outside the Dashboard instance.
+        Verification:
+            Smoke test: construct Dashboard; run server; open browser; verify
+            tabs render and monitor updates at configured interval.
+        References:
+            dash.dependencies.Input/Output/State; WR-VIZ-DASH-CLASS-001.
         """
 
         # ── Tab routing ──────────────────────────────────────────────────── #
@@ -616,11 +763,30 @@ class Dashboard:
     def _empty_pose_fig(self) -> go.Figure:
         """Return a blank 3-D scatter figure used before any pose data arrives.
 
-        The figure shows an empty cube with labelled axes and a 'Waiting for data'
-        title, preventing the graph component from displaying a grey placeholder.
-
-        Returns:
-            ``go.Figure`` with a 3-D scatter scene (no data points).
+        ID: WR-VIZ-DASH-EPOSEFIG-001
+        Requirement: Return a go.Figure with an empty Scatter3d trace, a labelled
+                     [-1,1]^3 cube scene, a 'Waiting for data' title, and dark
+                     background colours.
+        Purpose: Prevent the pose-graph card from showing a grey placeholder
+                 before the first frame arrives from the inference thread.
+        Rationale: A fully configured empty figure avoids layout shifts when
+                   data arrives and replaces the figure.
+        Inputs:
+            None.
+        Outputs:
+            go.Figure — empty 3-D scatter with configured layout.
+        Preconditions:
+            plotly.graph_objects must be available.
+        Postconditions:
+            Returned figure has zero data points.
+        Side Effects:
+            None — pure function; allocates a new Figure.
+        Failure Modes:
+            None.
+        Verification:
+            Unit test: assert len(fig.data[0].x) == 0.
+        References:
+            go.Scatter3d; go.Figure.update_layout; WR-VIZ-DASH-CLASS-001.
         """
         fig = go.Figure(go.Scatter3d(x=[], y=[], z=[], mode="markers",
                                      marker=dict(size=0, opacity=0)))
@@ -641,18 +807,33 @@ class Dashboard:
     def _update_pose_figure(self, pose_data: Optional[Dict]) -> go.Figure:
         """Build a 3-D scatter figure from the latest pose keypoints.
 
-        Renders:
-            - Keypoint markers coloured by confidence (Viridis colorscale).
-            - Skeleton edge lines for the 15 COCO-17 limb connections.
-            - Low-confidence keypoints (< 0.3) replaced with NaN so they are
-              invisible without removing them from the trace index.
-
-        Args:
-            pose_data: Dict with ``keypoints`` (17, 3) and ``confidence`` (17,),
-                       or None (returns ``_empty_pose_fig()``).
-
-        Returns:
-            Plotly ``go.Figure`` with scatter3d keypoints and line traces.
+        ID: WR-VIZ-DASH-UPOSEFIG-001
+        Requirement: Render COCO-17 keypoints as Viridis-coloured Scatter3d markers
+                     and draw 15 skeleton edge lines; mask low-confidence keypoints
+                     with NaN so they are invisible.
+        Purpose: Provide operators with a 3-D visualisation of the estimated human
+                 pose updated at the fast-interval rate.
+        Rationale: NaN masking preserves keypoint index alignment for line traces
+                   without removing entries from the trace arrays.
+        Inputs:
+            pose_data — Optional[Dict]: {'keypoints': (17,3), 'confidence': (17,)};
+                        None triggers _empty_pose_fig().
+        Outputs:
+            go.Figure — Scatter3d figure with keypoints and skeleton edges.
+        Preconditions:
+            pose_data must contain 'keypoints' and 'confidence' keys if not None.
+        Postconditions:
+            All edge traces connect only valid (confidence > 0.3) keypoints.
+        Assumptions:
+            Keypoints are normalised to [-1, 1]; COCO-17 edge list is hard-coded.
+        Side Effects:
+            None — pure function; allocates a new Figure.
+        Failure Modes:
+            pose_data is None: returns _empty_pose_fig().
+        Verification:
+            Unit test: provide synthetic pose_data; assert figure has > 1 trace.
+        References:
+            go.Scatter3d; COCO-17 edge list; WR-VIZ-DASH-CLASS-001.
         """
         if pose_data is None:
             return self._empty_pose_fig()
@@ -698,7 +879,25 @@ class Dashboard:
         return fig
 
     def _empty_confidence_fig(self) -> go.Figure:
-        """Return a blank confidence sparkline figure (used during initialisation)."""
+        """Return a blank confidence sparkline figure used during initialisation.
+
+        ID: WR-VIZ-DASH-ECONFFIG-001
+        Requirement: Return an empty go.Figure with Y axis [0,1] and dark
+                     background, ready to be populated by _update_confidence_figure.
+        Purpose: Prevent the confidence-graph card from showing a grey placeholder
+                 at startup.
+        Rationale: Consistent empty figure style avoids layout shifts on first update.
+        Inputs:
+            None.
+        Outputs:
+            go.Figure — empty confidence sparkline with configured layout.
+        Side Effects:
+            None — pure function.
+        Verification:
+            Unit test: assert fig.layout.yaxis.range == [0, 1].
+        References:
+            go.Figure.update_layout; WR-VIZ-DASH-CLASS-001.
+        """
         fig = go.Figure()
         fig.update_layout(
             xaxis=dict(title="Time", showticklabels=False),
@@ -714,14 +913,29 @@ class Dashboard:
     def _update_confidence_figure(self) -> go.Figure:
         """Build the rolling confidence + people-count sparkline from history deques.
 
-        Renders two overlaid line traces:
-            - Confidence (solid green): mean per-keypoint confidence over time.
-            - People count (dashed orange): number of detected people over time.
-
-        Both traces share the same X axis (frame index) and Y axis [0, 1.1].
-
-        Returns:
-            Plotly ``go.Figure`` with the two line traces.
+        ID: WR-VIZ-DASH-UCONFFIG-001
+        Requirement: Render two overlaid line traces (confidence and people count)
+                     from self.confidence_history and self.detected_people_history.
+        Purpose: Give operators a quick visual of detection quality and occupancy
+                 trends over the rolling history window.
+        Rationale: Overlaid traces share one X axis (frame index) so relative
+                   timing is visually clear without a secondary X axis.
+        Inputs:
+            None — reads self.confidence_history and self.detected_people_history.
+        Outputs:
+            go.Figure — line chart with confidence and people-count traces.
+        Preconditions:
+            Deques may be empty; handled gracefully (returns blank figure).
+        Postconditions:
+            Returned figure has 0 or 2 traces.
+        Side Effects:
+            None — read-only; allocates a new Figure.
+        Failure Modes:
+            Empty deques: returns a blank figure.
+        Verification:
+            Unit test: add 5 items to history deques; assert figure has 2 traces.
+        References:
+            go.Scatter; WR-VIZ-DASH-CLASS-001.
         """
         fig = go.Figure()
         if self.confidence_history:
@@ -745,7 +959,24 @@ class Dashboard:
         return fig
 
     def _empty_csi_fig(self) -> go.Figure:
-        """Return a blank CSI subcarrier figure (used during initialisation)."""
+        """Return a blank CSI subcarrier figure used during initialisation.
+
+        ID: WR-VIZ-DASH-ECSIFIG-001
+        Requirement: Return an empty go.Figure with 'Subcarrier'/'Amplitude' axis
+                     labels and dark background, ready for _update_csi_figure.
+        Purpose: Prevent the CSI card from showing a grey placeholder at startup.
+        Rationale: Consistent empty figure style avoids layout shifts on first update.
+        Inputs:
+            None.
+        Outputs:
+            go.Figure — empty CSI figure with configured layout.
+        Side Effects:
+            None — pure function.
+        Verification:
+            Unit test: assert fig.layout.xaxis.title.text == 'Subcarrier'.
+        References:
+            go.Figure.update_layout; WR-VIZ-DASH-CLASS-001.
+        """
         fig = go.Figure()
         fig.update_layout(xaxis_title="Subcarrier", yaxis_title="Amplitude",
                           margin=dict(l=10, r=10, t=10, b=10), height=200,
@@ -754,18 +985,35 @@ class Dashboard:
         return fig
 
     def _update_csi_figure(self, csi_data: Optional[Tuple]) -> go.Figure:
-        """Build the CSI subcarrier figure from the first TX-RX pair.
+        """Build the CSI subcarrier figure from the first TX-RX antenna pair.
 
-        Renders amplitude (left Y axis) and phase (right Y axis) for antenna
-        pair (TX0, RX0) across all subcarriers so the operator can verify the
-        raw signal quality.
-
-        Args:
-            csi_data: Tuple (amplitude, phase) where each array is shaped
-                      (num_tx, num_rx, num_subcarriers), or None.
-
-        Returns:
-            Plotly ``go.Figure`` with dual-Y-axis line traces.
+        ID: WR-VIZ-DASH-UCSIFIG-001
+        Requirement: Plot amplitude (primary Y) and phase (secondary Y) for antenna
+                     pair (TX0, RX0) across all subcarriers; return empty figure if
+                     csi_data is None.
+        Purpose: Allow operators to verify raw signal quality and check for anomalies
+                 or interference patterns in the CSI measurement.
+        Rationale: Dual-Y axes let amplitude and phase be shown at their natural
+                   scales without normalisation.
+        Inputs:
+            csi_data — Optional[Tuple[np.ndarray, np.ndarray]]: (amplitude, phase)
+                       each shaped (num_tx, num_rx, num_sub).
+        Outputs:
+            go.Figure — dual-Y line chart with amplitude and phase traces.
+        Preconditions:
+            csi_data arrays must be at least shape (1,1,N).
+        Postconditions:
+            Phase Y axis is locked to [-pi, pi].
+        Assumptions:
+            Only TX0/RX0 pair is plotted; multi-antenna display not implemented.
+        Side Effects:
+            None — pure function; allocates a new Figure.
+        Failure Modes:
+            csi_data is None: returns _empty_csi_fig().
+        Verification:
+            Unit test: provide 3x3x56 arrays; assert figure has 2 traces.
+        References:
+            go.Scatter dual Y axis; WR-VIZ-DASH-CLASS-001.
         """
         fig = go.Figure()
         if csi_data is not None:
@@ -805,20 +1053,38 @@ class Dashboard:
     ) -> None:
         """Thread-safe update of live inference results for the next dashboard refresh.
 
-        Called by the processing thread after each forward pass.  Only non-None
-        arguments overwrite the corresponding fields, so partial updates (e.g.
-        updating only ``csi_data``) are safe.
-
-        Args:
-            pose_data:        Dict with ``keypoints`` (17, 3) and ``confidence`` (17,).
-            confidence_data:  (17,) confidence array for the primary person.
-            csi_data:         Tuple (amplitude, phase) raw CSI arrays.
-            tracked_people:   List of TrackedPerson-like dicts with ``person_id``,
-                              ``keypoints``, and ``confidence`` fields.
-
-        Thread Safety:
-            All writes are wrapped in ``self.data_lock``.  The fast-interval
-            callback reads the same fields under the same lock.
+        ID: WR-VIZ-DASH-UPDATEDATA-001
+        Requirement: Overwrite non-None fields in shared state under data_lock
+                     so the fast-interval callback sees the most recent values.
+        Purpose: Decouple the inference pipeline thread from the Dash callback
+                 thread using a double-buffer pattern protected by data_lock.
+        Rationale: Only non-None arguments overwrite their fields so partial
+                   updates (e.g. CSI only) do not corrupt unrelated fields.
+        Inputs:
+            pose_data        — Optional[Dict]: {'keypoints': (17,3), 'confidence': (17,)}.
+            confidence_data  — Optional[np.ndarray]: (17,) per-keypoint confidence.
+            csi_data         — Optional[Tuple[ndarray, ndarray]]: (amplitude, phase).
+            tracked_people   — Optional[List[Dict]]: multi-person track list.
+        Outputs:
+            None — updates self fields as side effects.
+        Preconditions:
+            data_lock must not already be held by the calling thread.
+        Postconditions:
+            Updated fields reflect the provided arguments.
+        Assumptions:
+            Called from the processing thread; not from a Dash callback.
+        Side Effects:
+            Acquires self.data_lock; overwrites non-None shared fields.
+        Failure Modes:
+            None; lock prevents data races.
+        Error Handling:
+            None required.
+        Constraints:
+            Lock held only for the duration of field assignments.
+        Verification:
+            Unit test: call update_data(pose_data=x); with data_lock: assert pose_data==x.
+        References:
+            threading.Lock; WR-VIZ-DASH-CLASS-001.
         """
         with self.data_lock:
             if pose_data       is not None: self.pose_data       = pose_data
@@ -833,13 +1099,38 @@ class Dashboard:
     ) -> None:
         """Thread-safe append of fall events and replacement of gait metrics.
 
-        Args:
-            fall_events:  List of fall-event dicts to append.  The internal list
-                          is capped at 50 entries (oldest are dropped).
-            gait_metrics: Latest gait metrics dict; replaces previous value.
-
-        Thread Safety:
-            All mutations are wrapped in ``self._events_lock``.
+        ID: WR-VIZ-DASH-UPDATEEVT-001
+        Requirement: Append fall_events to self._fall_events (cap at 50) and replace
+                     self._gait_metrics, both under self._events_lock.
+        Purpose: Provide the slow-interval callback with up-to-date event and metric
+                 data without data races from the processing thread.
+        Rationale: A separate _events_lock from data_lock avoids priority inversion
+                   between high-frequency pose updates and low-frequency event updates.
+        Inputs:
+            fall_events  — Optional[List[Dict]]: events to append.
+            gait_metrics — Optional[Dict]: latest metrics to replace current value.
+        Outputs:
+            None — updates self fields as side effects.
+        Preconditions:
+            _events_lock must not already be held by the calling thread.
+        Postconditions:
+            self._fall_events has at most 50 entries.
+            self._gait_metrics reflects the latest provided value.
+        Assumptions:
+            Called from the processing thread.
+        Side Effects:
+            Acquires self._events_lock; extends and truncates self._fall_events;
+            replaces self._gait_metrics.
+        Failure Modes:
+            None; lock prevents data races.
+        Error Handling:
+            None required.
+        Constraints:
+            Event list capped at 50 entries (oldest dropped).
+        Verification:
+            Unit test: append 60 events; assert len(_fall_events) == 50.
+        References:
+            threading.Lock; WR-VIZ-DASH-CLASS-001.
         """
         with self._events_lock:
             if fall_events is not None:
@@ -849,7 +1140,34 @@ class Dashboard:
                 self._gait_metrics = gait_metrics
 
     def set_config_change_callback(self, fn) -> None:
-        """Register a callable invoked when the user saves config from the UI."""
+        """Register a callable invoked when the user saves config from the UI.
+
+        ID: WR-VIZ-DASH-SETCFGCB-001
+        Requirement: Store fn as self._on_config_change so the save_config Dash
+                     callback can invoke it with the new config dict after saving.
+        Purpose: Allow main.py to register a callback that propagates config
+                 changes to running subsystems without the dashboard importing them.
+        Rationale: Callback registration decouples the dashboard from specific
+                   subsystem classes, keeping it a pure presentation layer.
+        Inputs:
+            fn — callable(new_config: Dict) — invoked with the new config dict.
+        Outputs:
+            None — stores fn as self._on_config_change.
+        Preconditions:
+            fn must be callable with one dict argument.
+        Postconditions:
+            self._on_config_change == fn.
+        Side Effects:
+            Sets self._on_config_change.
+        Failure Modes:
+            Non-callable fn: will raise TypeError when save_config invokes it.
+        Error Handling:
+            None at registration time; save_config handles call exceptions.
+        Verification:
+            Unit test: register fn; save config; assert fn was called with new dict.
+        References:
+            save_config inner callback; WR-VIZ-DASH-CALLBACKS-001.
+        """
         self._on_config_change = fn
 
     # ═══════════════════════════════════════════════════════════════════════ #
@@ -857,17 +1175,39 @@ class Dashboard:
     # ═══════════════════════════════════════════════════════════════════════ #
 
     def run(self, debug: bool = False, port: int = 8050) -> None:
-        """Start the Dash development server (blocking).
+        """Start the Dash development server (blocking call).
 
-        Args:
-            debug: If True, enables Dash hot-reloading and error overlays.
-                   Should be False in production to avoid exposing debug info.
-            port:  TCP port the dashboard HTTP server listens on.
-
+        ID: WR-VIZ-DASH-RUN-001
+        Requirement: Start the Werkzeug HTTP server serving the Dash application
+                     on the specified port; block the calling thread until stopped.
+        Purpose: Activate the browser-accessible dashboard so operators can connect
+                 to http://localhost:port/ after all subsystems are started.
+        Rationale: use_reloader=False prevents Werkzeug from spawning a child
+                   process that would duplicate threads and open the RTMP streamer twice.
+        Inputs:
+            debug — bool: if True enables Dash hot-reloading and error overlays.
+            port  — int: TCP port for the HTTP server (default 8050).
+        Outputs:
+            None — blocks until interrupted.
+        Preconditions:
+            __init__() must have completed; all subsystems should be started before
+            calling run() so they are ready when the first browser request arrives.
+        Postconditions:
+            Server is running; blocks until Ctrl-C or process termination.
+        Assumptions:
+            The caller has started the processing thread before calling run().
         Side Effects:
-            Blocks the calling thread until the server is stopped (Ctrl-C or
-            process termination).  ``use_reloader=False`` prevents the Werkzeug
-            reloader from spawning a second process that would duplicate threads.
+            Binds TCP port; logs INFO message.
+        Failure Modes:
+            Port already in use: OSError raised by Werkzeug.
+        Error Handling:
+            None; caller must handle OSError.
+        Constraints:
+            debug=True must NOT be used in production (exposes error tracebacks).
+        Verification:
+            Integration test: start in a thread; assert HTTP GET / returns 200.
+        References:
+            Dash.run; Werkzeug use_reloader=False; WR-VIZ-DASH-CLASS-001.
         """
         self.logger.info("Starting dashboard on port %d", port)
         self.app.run(debug=debug, port=port, use_reloader=False)

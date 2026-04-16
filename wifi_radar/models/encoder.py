@@ -1,16 +1,14 @@
 """
 ID: WR-MODEL-ENC-001
-Requirement: Encode a (num_tx × num_rx × num_subcarriers) CSI frame into a fixed-length
-             feature vector used by downstream pose estimation and tracking modules.
-Purpose: Dual-branch convolutional encoder that processes amplitude and phase tensors
-         independently, fuses them at the channel level, then projects to a compact
-         embedding.  Keeping the branches separate until fusion lets each branch learn
-         modality-specific statistics before combining information.
+Requirement: Encode a (num_tx x num_rx x num_subcarriers) CSI frame into a
+             fixed-length feature vector used by downstream pose estimation.
+Purpose: Dual-branch convolutional encoder that processes amplitude and phase
+         tensors independently, fuses them, then projects to a compact embedding.
 Rationale: Amplitude carries multipath magnitude; phase carries time-of-flight shifts.
-           A shared encoder would entangle these signals early and suppress phase-only
-           or amplitude-only cues.  Adaptive average pooling instead of fixed max-pool
-           makes the encoder agnostic to the subcarrier-count dimension at export time.
-References: Widar3.0 (NSDI 2019), Wi-Pose (MobiSys 2022)
+           Separate branches until fusion prevent early entanglement of the two signals.
+Assumptions: 3x3 MIMO, 64 OFDM subcarriers by default; PyTorch >= 1.10.
+Constraints: Adaptive average pooling makes the encoder agnostic to subcarrier count.
+References: Widar3.0 (NSDI 2019), Wi-Pose (MobiSys 2022).
 """
 import logging
 
@@ -22,14 +20,34 @@ import torch.nn.functional as F
 class DualBranchEncoder(nn.Module):
     """Dual-branch convolutional encoder for amplitude and phase CSI tensors.
 
+    ID: WR-MODEL-ENC-CLASS-001
+    Requirement: Accept paired (amplitude, phase) CSI tensors and produce a
+                 fixed-size embedding vector for each frame in a batch.
+    Purpose: Extract modality-specific spatial features from each CSI branch
+             before fusing them into a single compact representation.
+    Rationale: Independent branch weights allow each path to specialise on
+               its signal statistics before a learned 1x1 fusion layer combines them.
+    Inputs:
+        amplitude — (batch, num_tx, num_rx, num_subcarriers) float32 tensor.
+        phase     — (batch, num_tx, num_rx, num_subcarriers) float32 tensor.
+    Outputs:
+        (batch, output_dim) float32 feature tensor.
+    Preconditions:
+        Both tensors on the same device as model parameters.
+    Postconditions:
+        Output embedding is suitable for direct input to PoseEstimator.
+    Assumptions:
+        Default config: num_tx=3, num_rx=3, num_subcarriers=64.
+    Constraints:
+        num_tx must be >= 1; adaptive pooling requires num_tx >= 1.
+    References:
+        Widar3.0 (NSDI 2019); Wi-Pose (MobiSys 2022).
+
     Architecture::
 
-        amplitude → Conv2d×3 (with BatchNorm + ReLU) ─┐
+        amplitude → Conv2d×3 (with BatchNorm + ReLU) ─┬
                                                         ├→ channel-concat → Conv1×1 → AdaptiveAvgPool → FC×2 → output
         phase     → Conv2d×3 (with BatchNorm + ReLU) ─┘
-
-    Both branches share the same layer structure but have independent weights so
-    each specialises on its modality before fusion.
     """
 
     def __init__(
@@ -37,15 +55,42 @@ class DualBranchEncoder(nn.Module):
     ):
         """Build all sub-modules and store dimension hyper-parameters.
 
-        Args:
-            num_tx:          Number of transmitting antennas (spatial height).
-            num_rx:          Number of receiving antennas (spatial height after reshape).
-            num_subcarriers: OFDM subcarrier count (spatial width after reshape).
-            hidden_dim:      Width of the first fully-connected projection layer.
-            output_dim:      Embedding size returned by forward() (input to PoseEstimator).
-
+        ID: WR-MODEL-ENC-INIT-001
+        Requirement: Construct all Conv2d, BatchNorm2d, and Linear sub-modules
+                     and store hyperparameter attributes for checkpoint provenance.
+        Purpose: Fully initialise the encoder so it is ready for a forward pass
+                 or weight loading without any additional setup calls.
+        Rationale: All layers are pre-allocated at construction time so the graph
+                   is static and compatible with torch.onnx.export tracing.
+        Inputs:
+            num_tx:          int >= 1: number of transmitting antennas (spatial height).
+            num_rx:          int >= 1: number of receiving antennas.
+            num_subcarriers: int >= 1: OFDM subcarrier count (spatial width factor).
+            hidden_dim:      int >= 1: width of the first FC projection layer.
+            output_dim:      int >= 1: embedding size returned by forward().
+        Outputs:
+            None — initialises self; call initialize_weights() for Kaiming init.
+        Preconditions:
+            PyTorch nn.Module parent __init__() must succeed.
+        Postconditions:
+            All sub-module parameter tensors allocated on CPU with default init.
+            self.num_tx, self.num_rx, self.num_subcarriers, self.hidden_dim,
+            self.output_dim are set for checkpoint provenance.
+        Assumptions:
+            default_rng initialisation (not Kaiming) is applied by PyTorch;
+            call initialize_weights() for Kaiming init.
         Side Effects:
             Allocates all Conv2d, BatchNorm2d, and Linear parameter tensors.
+        Failure Modes:
+            ValueError if any dimension argument <= 0.
+        Error Handling:
+            PyTorch raises ValueError for invalid layer dimensions.
+        Constraints:
+            flattened_size = 64 * num_tx * num_rx must fit in a Linear layer.
+        Verification:
+            Unit test: construct with defaults; assert output_dim == forward output shape.
+        References:
+            nn.Conv2d, nn.BatchNorm2d, nn.Linear PyTorch documentation.
         """
         super(DualBranchEncoder, self).__init__()
         self.logger = logging.getLogger("DualBranchEncoder")
@@ -102,18 +147,42 @@ class DualBranchEncoder(nn.Module):
     def forward(self, amplitude, phase):
         """Encode a CSI frame into a compact feature embedding.
 
-        Args:
-            amplitude: Float tensor (batch_size, num_tx, num_rx, num_subcarriers).
-                       Normalised CSI amplitude values.
-            phase:     Float tensor (batch_size, num_tx, num_rx, num_subcarriers).
-                       Unwrapped CSI phase values.
-
-        Returns:
-            Float tensor (batch_size, output_dim) — the embedded feature vector
-            consumed by PoseEstimator and MultiPersonPoseEstimator.
-
+        ID: WR-MODEL-ENC-FWD-001
+        Requirement: Process paired amplitude and phase CSI tensors through the
+                     dual-branch conv network and return a (batch, output_dim) embedding.
+        Purpose: Produce the feature vector consumed by PoseEstimator and
+                 MultiPersonPoseEstimator on each inference step.
+        Rationale: The reshape-then-conv approach treats the antenna-subcarrier
+                   space as a 2-D image so standard Conv2d kernels can be applied.
+        Inputs:
+            amplitude — float tensor (batch, num_tx, num_rx, num_subcarriers).
+                        Normalised CSI amplitude values, typically z-score normalised.
+            phase     — float tensor (batch, num_tx, num_rx, num_subcarriers).
+                        Unwrapped CSI phase values.
+        Outputs:
+            float tensor (batch, output_dim): embedded feature vector.
         Preconditions:
-            Both tensors must be on the same device as the model parameters.
+            Both tensors must be on the same device as model parameters.
+            amplitude.shape == phase.shape.
+        Postconditions:
+            Output has shape (batch_size, self.output_dim).
+            Output is suitable for direct input to PoseEstimator.forward().
+        Assumptions:
+            Batch size >= 1; single-sample inference with batch_size=1 is valid.
+        Side Effects:
+            None — pure functional forward pass.
+        Failure Modes:
+            Shape mismatch between amplitude and phase raises RuntimeError.
+            Device mismatch raises RuntimeError from PyTorch.
+        Error Handling:
+            PyTorch raises descriptive RuntimeError on tensor shape or device issues.
+        Constraints:
+            num_tx must be >= 1 for AdaptiveAvgPool2d to produce a valid output.
+        Verification:
+            Unit test: feed random tensors of shape (2, 3, 3, 64); assert output
+            shape is (2, 256) and all values are finite.
+        References:
+            Widar3.0 feature extraction; AdaptiveAvgPool2d PyTorch docs.
         """
         batch_size = amplitude.shape[0]
 
@@ -161,13 +230,38 @@ class DualBranchEncoder(nn.Module):
     def initialize_weights(self):
         """Apply Kaiming (He) initialization to all Conv2d and Linear layers.
 
-        Kaiming normal initialization is recommended for layers followed by ReLU
-        because it sets the variance such that the signal neither vanishes nor
-        explodes as it propagates through the network (He et al., 2015).
-
+        ID: WR-MODEL-ENC-INIT-WEIGHTS-001
+        Requirement: Set all Conv2d and Linear layer weights using Kaiming normal
+                     initialisation and zero-initialise all biases and BatchNorm biases.
+        Purpose: Provide stable gradient flow at the start of training by scaling
+                 initial weight variance according to the fan-out of each layer.
+        Rationale: Kaiming normal init is recommended for ReLU networks because it
+                   prevents vanishing/exploding gradients at initialisation depth.
+        Inputs:
+            None — operates on self.modules().
+        Outputs:
+            None — modifies parameter tensors in-place.
+        Preconditions:
+            All sub-modules must already be allocated (called after __init__).
+        Postconditions:
+            Conv2d weights are Kaiming-normal; biases are zero.
+            BatchNorm2d weight=1, bias=0 (identity at init).
+            Linear weights are Normal(0, 0.01); biases are zero.
+        Assumptions:
+            All convolutional layers are followed by ReLU activations.
         Side Effects:
-            Modifies parameter tensors of all Conv2d, BatchNorm2d, and Linear
-            sub-modules in-place.
+            Modifies all Conv2d, BatchNorm2d, and Linear parameter tensors in-place.
+        Failure Modes:
+            None expected; all sub-module types are handled.
+        Error Handling:
+            Unknown module types are silently skipped (isinstance checks only).
+        Constraints:
+            Must be called before training or ONNX export for reproducible initialisation.
+        Verification:
+            Unit test: call initialize_weights(); assert conv weight std is close to
+            sqrt(2 / fan_out) per Kaiming formula.
+        References:
+            He et al. (2015) 'Delving Deep into Rectifiers'; nn.init.kaiming_normal_.
         """
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
