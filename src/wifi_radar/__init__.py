@@ -14,4 +14,4 @@ A Python implementation for detecting and tracking human poses through walls
 using WiFi signals.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

@@ -362,39 +362,70 @@ class CSICollector:
 
         ID: WR-DATA-CSI-PARSE-001
         Requirement: Convert a raw byte buffer from the router TCP stream into
-                     (amplitude, phase) float64 arrays of shape (num_tx, num_rx, num_sub).
+                     (amplitude, phase) float32 arrays of shape (num_tx, num_rx, num_sub).
         Purpose: Isolate firmware-specific byte-layout parsing from the collection loop.
-        Rationale: A placeholder implementation returning zeros is safe as a fallback;
-                   real parsing must be implemented per target router chipset.
+        Rationale: Supporting a small set of well-defined binary layouts enables real
+                   integration testing while still preserving a safe fallback path.
         Inputs:
             raw_data — bytes: raw packet received from the router TCP socket.
         Outputs:
-            Tuple (amplitude, phase), each (num_tx, num_rx, num_sub) float64.
+            Tuple (amplitude, phase), each (num_tx, num_rx, num_sub) float32.
         Preconditions:
             raw_data is a non-empty bytes object.
         Postconditions:
-            Returns arrays of the correct shape regardless of raw_data content.
+            Returns arrays of the correct shape when the payload matches one of the
+            supported formats; otherwise returns zeros and logs a warning.
         Assumptions:
-            PLACEHOLDER: current implementation returns zeros; real parsing needed
-            for Atheros/Intel IWL5300/Nexmon firmware.
+            Supported formats are:
+              1. "CSI0" + <III dims> + float32 amplitude + float32 phase.
+              2. Raw complex64 tensor bytes of shape (num_tx, num_rx, num_sub).
+              3. Raw float32 bytes containing amplitude then phase back-to-back.
         Side Effects:
-            None — pure function.
+            Logs a warning for malformed or unsupported packets.
         Failure Modes:
-            Malformed packets: current implementation ignores content, returns zeros.
+            Malformed packet or wrong byte count: safe zero fallback returned.
         Error Handling:
-            No exception handling; struct.unpack errors should be caught when implementing.
+            All unpack/reshape errors are caught and converted into warnings.
         Constraints:
-            Must be replaced with chipset-specific struct unpacking before real deployment.
+            Real chipset-specific formats may still require an adapter layer.
         Verification:
-            Integration test: send known CSI packet bytes; assert parsed arrays match
-            expected amplitude and phase values.
+            Unit test: send a CSI0 packet and confirm exact round-trip values.
         References:
-            Linux 802.11n CSI Tool; Nexmon CSI extraction; struct module.
+            struct module; Linux 802.11n CSI Tool; Nexmon CSI extraction.
         """
-        # Return zero arrays as a safe no-op placeholder.
-        amplitude = np.zeros((self.num_tx, self.num_rx, self.num_subcarriers))
-        phase = np.zeros((self.num_tx, self.num_rx, self.num_subcarriers))
-        return amplitude, phase
+        expected = self.num_tx * self.num_rx * self.num_subcarriers
+        try:
+            if not raw_data:
+                raise ValueError("empty CSI packet")
+
+            if raw_data[:4] == b"CSI0":
+                header_size = 4 + struct.calcsize("<III")
+                tx, rx, sub = struct.unpack("<III", raw_data[4:header_size])
+                count = tx * rx * sub
+                float_data = np.frombuffer(raw_data[header_size:], dtype=np.float32)
+                if float_data.size != count * 2:
+                    raise ValueError("CSI0 packet does not contain amplitude+phase payload")
+                amplitude = float_data[:count].reshape(tx, rx, sub)
+                phase = float_data[count:].reshape(tx, rx, sub)
+                return amplitude.astype(np.float32), phase.astype(np.float32)
+
+            complex_data = np.frombuffer(raw_data, dtype=np.complex64)
+            if complex_data.size == expected:
+                complex_data = complex_data.reshape(self.num_tx, self.num_rx, self.num_subcarriers)
+                return np.abs(complex_data).astype(np.float32), np.angle(complex_data).astype(np.float32)
+
+            float_data = np.frombuffer(raw_data, dtype=np.float32)
+            if float_data.size == expected * 2:
+                amplitude = float_data[:expected].reshape(self.num_tx, self.num_rx, self.num_subcarriers)
+                phase = float_data[expected:].reshape(self.num_tx, self.num_rx, self.num_subcarriers)
+                return amplitude.astype(np.float32), phase.astype(np.float32)
+
+            raise ValueError(f"unsupported CSI packet length: {len(raw_data)} bytes")
+        except Exception as exc:
+            self.logger.warning("Failed to parse CSI packet: %s", exc)
+            amplitude = np.zeros((self.num_tx, self.num_rx, self.num_subcarriers), dtype=np.float32)
+            phase = np.zeros((self.num_tx, self.num_rx, self.num_subcarriers), dtype=np.float32)
+            return amplitude, phase
 
     def _add_simulated_human_presence(self, amplitude, phase, people=None):
         """Modulate background CSI arrays in-place to simulate human multipath effects.

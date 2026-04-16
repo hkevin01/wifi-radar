@@ -20,60 +20,103 @@
 
 ## Overview
 
-WiFi-Radar is a Python research system that uses commodity **802.11n/ac WiFi
-routers** to estimate human body poses in real time.  By analysing how WiFi
-signals (Channel State Information — CSI) reflect off human bodies, the system
-detects presence, estimates 17-keypoint 3-D poses, tracks multiple people with
-stable identities, detects falls, and measures gait — **through walls**, with no
-cameras and no specialist hardware.
+WiFi-Radar is a Python research system for **WiFi-based human pose estimation,
+tracking, fall detection, gait analytics, and headless monitoring**. It consumes
+Channel State Information from commodity WiFi hardware or the built-in
+simulation pipeline, transforms it into learned embeddings, and emits
+17-keypoint 3-D pose outputs in real time.
 
-The architecture follows
-*[DensePose from WiFi](https://dl.acm.org/doi/abs/10.1145/3487552.3487868)*
-(Li et al., ACM SIGCOMM 2022) and extends it with multi-person tracking,
-health analytics, ONNX edge export and a full Docker deployment stack.
+This repository is aimed at **researchers, embedded/edge developers, and
+privacy-first sensing prototypes** that need room-scale awareness without
+cameras.
 
-```
-WiFi Router ──► CSI Collector ──► Signal Processor ──► Dual-Branch CNN Encoder
-                                                                │
-                                                     Multi-Person LSTM Decoder
-                                                                │
-                                                    MultiPersonTracker (greedy IDs)
-                                                                │
-                     ┌──────────────────┬─────────────────────┤
-                     ▼                  ▼                      ▼
-              FallDetector        GaitAnalyzer           House Visualizer
-            (4-state FSM)     (step + cadence)           (pygame overlay)
-                     │                  │
-                     └────────┬─────────┘
-                              ▼
-                       Dash Dashboard            RTMP Stream → nginx-rtmp → HLS
-                 Live Monitor | Events         (OBS / browser / VLC)
-                  | Configuration UI
-```
+> [!IMPORTANT]
+> The project now uses a **src layout**. The importable package lives in
+> **src/wifi_radar**, while packaging and environment files stay at the repo root.
+
+> [!TIP]
+> Start with simulation mode first, then enable the REST API or RTMP stream as
+> needed.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Architecture Overview](#architecture-overview)
+- [Technology Stack](#technology-stack)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+- [Multi-Person Tracking](#multi-person-tracking)
+- [Fall Detection](#fall-detection)
+- [Gait Analysis](#gait-analysis)
+- [Gait Anomaly Detection](#gait-anomaly-detection)
+- [REST API and Headless Mode](#rest-api-and-headless-mode)
+- [Transfer Learning on Real CSI](#transfer-learning-on-real-csi)
+- [ONNX Export](#onnx-export)
+- [TensorRT Deployment](#tensorrt-deployment)
+- [Docker Deployment](#docker-deployment)
+- [Project Structure](#project-structure)
+- [Development](#development)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
-## Features
+## Key Features
 
-| Feature | Status |
-|---|---|
-| CSI data collection (3×3 MIMO, 64 sub-carriers) | ✅ |
-| Simulation mode — no router required (1–4 virtual people) | ✅ |
-| Butterworth low-pass + sub-carrier smoothing | ✅ |
-| Dual-branch CNN encoder (amplitude + phase) | ✅ |
-| LSTM-based temporal pose estimator (17 keypoints, 3-D) | ✅ |
-| Pre-trained simulation-baseline weights | ✅ |
-| Multi-person detection + stable ID tracking | ✅ |
-| Fall detection — velocity + body-angle state machine | ✅ |
-| Gait analysis — cadence, stride, symmetry, speed | ✅ |
-| ONNX export for edge deployment (Jetson / RPi) | ✅ |
-| Real-time Dash dashboard — 3 tabs | ✅ |
-| Live Configuration UI — YAML persistence | ✅ |
-| Events tab — fall alerts + gait metrics table | ✅ |
-| RTMP video stream (FFmpeg h264) | ✅ |
-| Docker stack — nginx-rtmp + HLS browser playback | ✅ |
-| Optional pygame house visualizer | ✅ |
-| Engineering-grade structured documentation on every class and method | ✅ |
+| Icon | Feature | Description | Impact | Status |
+|---|---|---|---|---|
+| 📶 | CSI collection | Real or simulated CSI frames with 3×3 MIMO support | High | ✅ Stable |
+| 🧠 | Dual-branch pose pipeline | Amplitude + phase encoder feeding temporal pose estimation | High | ✅ Stable |
+| 👥 | Multi-person tracking | Stable IDs via greedy centroid matching | High | ✅ Stable |
+| 🚨 | Fall detection | Velocity + body-angle state machine for alerts | High | ✅ Stable |
+| 🚶 | Gait analytics | Cadence, stride, symmetry, and speed metrics | High | ✅ Stable |
+| 🩺 | Gait anomaly detection | Rolling abnormality detection using gait metrics | Medium | 🧪 Experimental |
+| 🌐 | REST API | Headless integration endpoints for status, config, events, and metrics | High | 🧪 Experimental |
+| ⚡ | ONNX and TensorRT export | Edge deployment path for Jetson-style hardware | High | 🧪 Experimental |
+| 🧪 | Transfer learning workflow | Fine-tune on real-world CSI datasets in NPZ format | High | 🧪 Experimental |
+| 🐳 | Docker deployment | App + RTMP stack via Compose | Medium | ✅ Stable |
+
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart TD
+    A[WiFi Router or Simulator] --> B[CSICollector]
+    B --> C[SignalProcessor]
+    C --> D[DualBranchEncoder]
+    D --> E[PoseEstimator]
+    E --> F[MultiPersonTracker]
+    F --> G[FallDetector]
+    F --> H[GaitAnalyzer]
+    H --> I[GaitAnomalyDetector]
+    F --> J[Dashboard]
+    F --> K[REST API]
+    J --> L[RTMPStreamer]
+```
+
+The runtime pipeline is organised around a single orchestration entry point in
+**main.py**. CSI is collected, denoised, encoded, decoded into pose keypoints,
+and then routed into tracking, fall analysis, gait analytics, optional anomaly
+flagging, dashboard visualisation, RTMP streaming, and the optional REST API.
+
+---
+
+## Technology Stack
+
+| Technology | Purpose | Why Chosen | Alternatives |
+|---|---|---|---|
+| Python | Core runtime and tooling | Fast iteration for research systems | C++, Rust |
+| PyTorch | Model training and inference | Flexible for CNN/LSTM experimentation | TensorFlow |
+| SciPy + NumPy | Signal processing and numerical ops | Mature scientific stack | Custom DSP code |
+| Dash + Plotly | Live monitoring UI | Fast interactive dashboarding | Streamlit, React |
+| FastAPI + Uvicorn | Headless REST API | Typed endpoints and automatic docs | Flask |
+| ONNX | Portable model export | Runtime-neutral deployment path | TorchScript |
+| TensorRT | Jetson acceleration | Best NVIDIA edge inference performance | Plain ONNX Runtime |
+| Docker + nginx-rtmp | Deployment and streaming | Reproducible stack and HLS playback | Bare-metal services |
 
 ---
 
@@ -111,13 +154,16 @@ cd wifi-radar
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
-# 3. Install
+# 3. Install runtime dependencies
 pip install -r requirements.txt
 
-# 4. (Optional) Train simulation-baseline weights  (~2 min on CPU)
+# 4. Install the package in editable mode (recommended with the src layout)
+pip install -e .
+
+# 5. (Optional) Train simulation-baseline weights
 python scripts/train_simulation_baseline.py
 
-# 5. Run  — dashboard opens at http://localhost:8050
+# 6. Run the dashboard pipeline
 python main.py --simulation
 ```
 
@@ -139,58 +185,54 @@ HLS stream: `http://localhost:8080/hls/wifi_radar.m3u8`
 
 ## Usage
 
-```
-usage: main.py [-h] [--simulation] [--router-ip ROUTER_IP]
-               [--router-port ROUTER_PORT] [--dashboard-port DASHBOARD_PORT]
-               [--rtmp-url RTMP_URL] [--weights WEIGHTS]
-               [--num-people NUM_PEOPLE] [--export-onnx]
-               [--house-visualization] [--record] [--output-dir OUTPUT_DIR]
-               [--replay REPLAY] [--config CONFIG] [--debug]
+```bash
+python main.py --simulation
+python main.py --simulation --num-people 2 --api --headless
+python main.py --router-ip 192.168.1.1 --rtmp-url rtmp://localhost/live/wifi_radar
 ```
 
 ### Flag reference
 
 | Flag | Default | Description |
 |---|---|---|
-| `--simulation` | — | Use built-in CSI simulator (no router) |
-| `--num-people N` | `1` | Simulated people count (1–4) |
+| `--simulation` | off | Use the built-in CSI simulator |
+| `--num-people N` | `1` | Simulated people count |
 | `--router-ip IP` | `192.168.1.1` | Real router address |
 | `--router-port P` | `5500` | CSI TCP port |
-| `--weights PATH` | `weights/simulation_baseline.pth` | Checkpoint to load |
-| `--export-onnx` | — | Export models to ONNX then exit |
-| `--dashboard-port P` | `8050` | Dashboard port |
-| `--rtmp-url URL` | `rtmp://localhost/live/wifi_radar` | RTMP push destination |
-| `--house-visualization` | — | Enable pygame overlay |
-| `--record` | — | Save CSI frames to disk |
+| `--weights PATH` | auto | Checkpoint to load |
+| `--export-onnx` | off | Export ONNX models and exit |
+| `--dashboard-port P` | `8050` | Dash UI port |
+| `--rtmp-url URL` | local RTMP URL | RTMP push target |
+| `--house-visualization` | off | Enable pygame room view |
+| `--api` | off | Enable the FastAPI REST service |
+| `--api-host HOST` | `0.0.0.0` | API bind host |
+| `--api-port P` | `8081` | API bind port |
+| `--headless` | off | Run without blocking on the dashboard |
+| `--record` | off | Save CSI frames to disk |
 | `--output-dir DIR` | `~/wifi_data` | Recording output directory |
-| `--replay FILE` | — | Replay a recorded session |
-| `--config FILE` | `~/.wifi_radar/config.yaml` | YAML config file |
-| `--debug` | — | Verbose logging |
+| `--replay FILE` | none | Replay a recorded session |
+| `--config FILE` | user config path | YAML config file |
+| `--debug` | off | Verbose logging |
 
 ### Common examples
 
 ```bash
-# Simulation — 2 virtual people
+# Simulation with two virtual people
 python main.py --simulation --num-people 2
 
-# Load pre-trained weights explicitly
-python main.py --simulation --weights weights/simulation_baseline.pth
+# Headless embedded mode with REST API only
+python main.py --simulation --api --api-port 8081 --headless
 
-# Connect to a real router
-python main.py --router-ip <YOUR_ROUTER_IP>
-
-# Export models to ONNX for edge deployment
+# Export ONNX models for edge deployment
 python main.py --export-onnx --weights weights/simulation_baseline.pth
 
-# Full pipeline with RTMP stream
+# Start the full dashboard + RTMP pipeline
 python main.py --simulation --rtmp-url rtmp://localhost/live/wifi_radar
-
-# Record a session
-python main.py --simulation --record --output-dir ~/wifi_data
-
-# Replay and analyse recorded data
-python main.py --replay ~/wifi_data/session_001.npy
 ```
+
+> [!NOTE]
+> When the API is enabled, interactive endpoint docs are available at
+> **http://localhost:8081/docs** by default.
 
 ### Configuration file
 
@@ -334,6 +376,85 @@ Gait metrics appear in the dashboard **Events** tab, updated every 2 seconds.
 
 ---
 
+## Gait Anomaly Detection
+
+The new `GaitAnomalyDetector` monitors the rolling gait-metric stream and flags
+sudden deviations in cadence, stride length, symmetry, or estimated speed.
+
+```python
+from wifi_radar.analysis.gait_anomaly_detector import GaitAnomalyDetector
+
+anomaly_detector = GaitAnomalyDetector(warmup_samples=20, z_threshold=3.0)
+result = anomaly_detector.update(metrics)
+if result["is_anomaly"]:
+    print(result["severity"], result["reasons"])
+```
+
+It combines **robust rolling z-scores** with an optional
+**IsolationForest-based outlier model** for a lightweight abnormal-gait screen.
+
+---
+
+## REST API and Headless Mode
+
+WiFi-Radar can now run without the dashboard for embedded or service-style
+integrations.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant App as main.py
+    participant API as FastAPI
+    participant Pipeline as Pose Pipeline
+    User->>App: start with --api --headless
+    App->>Pipeline: process CSI frames
+    Pipeline->>API: publish status, events, gait metrics
+    User->>API: GET /status
+    API-->>User: JSON health and state snapshot
+```
+
+Core endpoints:
+
+- `GET /health`
+- `GET /status`
+- `GET /config`
+- `POST /config`
+- `POST /ingest`
+- `GET /people`
+- `GET /events`
+- `GET /metrics/gait`
+
+Example:
+
+```bash
+python main.py --simulation --api --headless
+curl http://localhost:8081/health
+```
+
+---
+
+## Transfer Learning on Real CSI
+
+For real-world adaptation, the repository now includes a transfer-learning
+workflow that fine-tunes the simulation baseline on NPZ datasets containing:
+
+- `amplitude`
+- `phase`
+- `keypoints`
+- optional `confidence`
+
+```bash
+python scripts/train_transfer_learning.py data/real_world/*.npz \
+  --weights weights/simulation_baseline.pth \
+  --epochs 40 \
+  --output weights/realworld_transfer.pth
+```
+
+The script starts with the simulation checkpoint, freezes the encoder for an
+initial warm-up phase, then unfreezes the backbone for full fine-tuning.
+
+---
+
 ## ONNX Export
 
 Export both models for edge deployment with a single command:
@@ -364,6 +485,26 @@ import numpy as np
 sess = ort.InferenceSession("weights/encoder.onnx", providers=["CPUExecutionProvider"])
 features = sess.run(["features"], {"amplitude": amp_np, "phase": phase_np})[0]
 ```
+
+---
+
+## TensorRT Deployment
+
+For Jetson-class hardware, WiFi-Radar now includes a helper script that builds
+TensorRT engine plans from the exported ONNX models using **trtexec**.
+
+```bash
+python scripts/export_tensorrt.py \
+  --precision fp16 \
+  --output-dir weights/tensorrt
+```
+
+This path is best suited to **Jetson Nano / Xavier / Orin** systems where the
+TensorRT runtime is already installed.
+
+> [!WARNING]
+> TensorRT engine generation is hardware-specific. Build the engine on the same
+> class of NVIDIA target device you plan to deploy on.
 
 ---
 
@@ -422,51 +563,54 @@ The Dash dashboard at **http://localhost:8050** has three tabs:
 
 ## Project Structure
 
-```
+```text
 wifi-radar/
-├── main.py                          # Entry point — arg parsing, orchestration
-├── wifi_radar/                      # Core Python package
-│   ├── analysis/
-│   │   ├── fall_detector.py         # 4-state fall FSM (velocity + angle + height)
-│   │   └── gait_analyzer.py         # Step detection + cadence / stride / symmetry
-│   ├── config/
-│   ├── data/
-│   │   └── csi_collector.py         # CSI capture + multi-person simulation
-│   ├── models/
-│   │   ├── encoder.py               # Dual-branch CNN (amplitude + phase, adaptive pool)
-│   │   ├── multi_person_tracker.py  # BiLSTM + N heads + greedy ID tracker
-│   │   └── pose_estimator.py        # Single-person LSTM (17 kp, 3-D)
-│   ├── processing/
-│   │   └── signal_processor.py      # Phase unwrap, Butterworth LP, sub-carrier smooth
-│   ├── streaming/
-│   │   └── rtmp_streamer.py         # FFmpeg subprocess RTMP push
-│   ├── utils/
-│   │   ├── code_quality.py          # Dev helper: lint / format
-│   │   └── model_io.py              # save_checkpoint / load_checkpoint with metadata
-│   └── visualization/
-│       ├── dashboard.py             # 3-tab Dash dashboard
-│       └── house_visualizer.py      # Optional pygame overlay
+├── main.py
+├── src/
+│   └── wifi_radar/
+│       ├── analysis/
+│       │   ├── fall_detector.py
+│       │   ├── gait_analyzer.py
+│       │   └── gait_anomaly_detector.py
+│       ├── api/
+│       │   ├── __init__.py
+│       │   └── app.py
+│       ├── data/
+│       │   └── csi_collector.py
+│       ├── models/
+│       │   ├── encoder.py
+│       │   ├── multi_person_tracker.py
+│       │   └── pose_estimator.py
+│       ├── processing/
+│       │   └── signal_processor.py
+│       ├── streaming/
+│       │   └── rtmp_streamer.py
+│       ├── utils/
+│       │   ├── code_quality.py
+│       │   └── model_io.py
+│       └── visualization/
+│           ├── dashboard.py
+│           └── house_visualizer.py
 ├── scripts/
-│   ├── export_onnx.py               # Export encoder + pose_estimator → ONNX
-│   ├── train_simulation_baseline.py # Train on 8K synthetic CSI/pose pairs
-│   ├── setup_venv.sh
-│   └── check_code.sh
-├── docker/
-│   ├── Dockerfile                   # python:3.11-slim + ffmpeg + OpenCV
-│   ├── docker-compose.yml           # App + nginx-rtmp stack
-│   └── nginx-rtmp.conf              # RTMP ingest + HLS output config
+│   ├── export_onnx.py
+│   ├── export_tensorrt.py
+│   ├── train_simulation_baseline.py
+│   └── train_transfer_learning.py
 ├── tests/
-├── weights/                         # Checkpoint files (gitignored except .gitkeep)
-│   └── .gitkeep
+│   ├── test_api.py
+│   ├── test_csi_parser.py
+│   └── test_gait_anomaly_detector.py
+├── docker/
 ├── docs/
-│   ├── # WiFi-Radar Setup Guide.md  # Router flashing + CSI tool setup
-│   ├── system_overview.md           # Full pipeline diagram and design notes
-│   └── reference.md                 # Bibliography and research references
-├── requirements.txt                 # Runtime — numpy, torch, dash, onnx, …
-├── requirements-dev.txt             # Dev — black, pytest, mypy, …
-├── pyproject.toml                   # PEP 517/518 build + tool configs (v1.0.0)
-└── setup.cfg                        # flake8, isort, mypy, black settings
+├── requirements.txt
+├── requirements-dev.txt
+├── pyproject.toml
+└── setup.cfg
 ```
+
+> [!NOTE]
+> Only the importable Python package lives under **src/**. Build metadata,
+> requirements files, Docker config, tests, and documentation stay at the repo root.
 
 ---
 
@@ -539,26 +683,33 @@ execution through the full pipeline.
 ## Development
 
 ```bash
-# Install dev dependencies
+# Install runtime + dev tooling
+pip install -r requirements.txt
 pip install -r requirements-dev.txt
+pip install -e .
 
 # Install pre-commit hooks
 pre-commit install
 
-# Run linting
+# Lint and format
 ./scripts/check_code.sh
-
-# Run tests
-pytest tests/ -v --cov=wifi_radar
-
-# Format code
 black . && isort .
 
-# Train simulation weights (quick — 80 epochs, ~2 min CPU)
+# Focused tests
+pytest tests/ -v
+
+# Coverage report
+pytest --cov=src/wifi_radar --cov-report=term-missing
+
+# Train the simulation baseline
 python scripts/train_simulation_baseline.py
 
-# Export to ONNX
+# Fine-tune on real CSI datasets
+python scripts/train_transfer_learning.py data/real_world/*.npz
+
+# Export for edge deployment
 python scripts/export_onnx.py --weights weights/simulation_baseline.pth
+python scripts/export_tensorrt.py --precision fp16
 ```
 
 ---
@@ -603,9 +754,30 @@ Full bibliography: [docs/reference.md](docs/reference.md)
 - Simulation-baseline training script
 - 15-field structured comment documentation on every class and method
 
+### Current repository additions
+- REST API for headless and embedded deployment
+- Gait anomaly detection using rolling metrics and unsupervised outlier scoring
+- Transfer-learning script for real-world CSI datasets
+- TensorRT export helper for Jetson-class devices
+- Focused automated tests with coverage reporting
+- src-based package layout cleanup
+
 ---
 
 ## Roadmap
+
+```mermaid
+gantt
+    title WiFi-Radar Delivery Status
+    dateFormat  YYYY-MM-DD
+    section Completed
+    Simulation baseline           :done, a1, 2026-01-01, 2026-01-20
+    Dashboard and RTMP            :done, a2, 2026-01-21, 2026-02-10
+    API and anomaly detection     :done, a3, 2026-02-11, 2026-03-05
+    section Next
+    Real hardware validation      :active, a4, 2026-04-01, 2026-06-01
+    Edge deployment hardening     :a5, 2026-06-02, 2026-07-15
+```
 
 - [x] Pre-trained model weights (simulation baseline)
 - [x] Multi-person pose clustering
@@ -614,11 +786,13 @@ Full bibliography: [docs/reference.md](docs/reference.md)
 - [x] Docker container with RTMP server included
 - [x] Web UI configuration panel
 - [x] Engineering-grade structured documentation (all classes + methods)
-- [ ] Transfer learning from real-world CSI datasets
-- [ ] TensorRT optimisation for Jetson Nano deployment
-- [ ] REST API for headless / embedded integration
-- [ ] Automated test suite with coverage reporting
-- [ ] Anomaly detection for unusual gait patterns
+- [x] Transfer learning from real-world CSI datasets
+- [x] TensorRT optimisation for Jetson Nano deployment
+- [x] REST API for headless / embedded integration
+- [x] Automated test suite with coverage reporting
+- [x] Anomaly detection for unusual gait patterns
+- [ ] Extended real-hardware validation against live CSI captures
+- [ ] Broader end-to-end regression coverage across the dashboard and streaming stack
 
 ---
 

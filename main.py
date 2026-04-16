@@ -28,21 +28,16 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Add the project root to the Python path
+# Add the src/ package directory to the Python path when running from the repo.
 project_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(project_root)
+src_root = os.path.join(project_root, "src")
+if os.path.isdir(src_root) and src_root not in sys.path:
+    sys.path.insert(0, src_root)
+elif project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-from wifi_radar.analysis.fall_detector import FallDetector, FallSeverity
-from wifi_radar.analysis.gait_analyzer import GaitAnalyzer
-from wifi_radar.data.csi_collector import CSICollector
-from wifi_radar.models.encoder import DualBranchEncoder
-from wifi_radar.models.multi_person_tracker import MultiPersonTracker
-from wifi_radar.models.pose_estimator import PoseEstimator
-from wifi_radar.processing.signal_processor import SignalProcessor
-from wifi_radar.streaming.rtmp_streamer import RTMPStreamer
-from wifi_radar.utils.model_io import load_checkpoint
-from wifi_radar.visualization.dashboard import Dashboard
-from wifi_radar.visualization.house_visualizer import HouseVisualizer  # noqa: F401
+# Heavy ML/runtime imports are intentionally deferred until main() so that
+# `python main.py --help` works even before the full stack is installed.
 
 
 def parse_args():
@@ -137,6 +132,10 @@ def parse_args():
         action="store_true",
         help="Export loaded models to ONNX then exit (requires onnx / onnxruntime)",
     )
+    parser.add_argument("--api", action="store_true", help="Enable the REST API server")
+    parser.add_argument("--api-host", type=str, default="0.0.0.0", help="REST API bind host")
+    parser.add_argument("--api-port", type=int, default=8081, help="REST API port")
+    parser.add_argument("--headless", action="store_true", help="Run without blocking on the Dash dashboard")
 
     return parser.parse_args()
 
@@ -256,6 +255,11 @@ def load_config(config_path=None):
             "fps": 30,
             "wall_transparency": 0.5,
         },
+        "api": {
+            "enabled": False,
+            "host": "0.0.0.0",
+            "port": 8081,
+        },
     }
 
     # If config path is provided, load and override defaults
@@ -346,6 +350,14 @@ def main():
         config["house_visualization"]["enabled"] = True
     if args.num_people:
         config["system"]["num_people"] = args.num_people
+    if args.api:
+        config["api"]["enabled"] = True
+    if args.api_host:
+        config["api"]["host"] = args.api_host
+    if args.api_port:
+        config["api"]["port"] = args.api_port
+    if args.headless:
+        config["system"]["headless"] = True
 
     # ── ONNX export shortcut ──────────────────────────────────────────────
     if args.export_onnx:
@@ -355,6 +367,31 @@ def main():
             cmd += ["--weights", args.weights]
         subprocess.run(cmd, check=True)
         sys.exit(0)
+
+    try:
+        import torch
+
+        from wifi_radar.analysis.fall_detector import FallDetector, FallSeverity
+        from wifi_radar.analysis.gait_analyzer import GaitAnalyzer
+        from wifi_radar.analysis.gait_anomaly_detector import GaitAnomalyDetector
+        from wifi_radar.data.csi_collector import CSICollector
+        from wifi_radar.models.encoder import DualBranchEncoder
+        from wifi_radar.models.multi_person_tracker import MultiPersonTracker
+        from wifi_radar.models.pose_estimator import PoseEstimator
+        from wifi_radar.processing.signal_processor import SignalProcessor
+        from wifi_radar.streaming.rtmp_streamer import RTMPStreamer
+        from wifi_radar.utils.model_io import load_checkpoint
+        from wifi_radar.visualization.dashboard import Dashboard
+        from wifi_radar.visualization.house_visualizer import HouseVisualizer  # noqa: F401
+
+        try:
+            from wifi_radar.api import AppState, run_api_server
+        except Exception:
+            AppState = None
+            run_api_server = None
+    except ImportError as exc:
+        logger.error("Missing runtime dependency: %s. Install requirements.txt or activate the project venv.", exc)
+        raise
 
     # Initialize data collection
     logger.info("Initializing CSI data collection")
@@ -392,7 +429,9 @@ def main():
 
     # Per-person fall detectors and gait analysers (created on demand)
     fall_detectors: dict = {}
-    gait_analysers: dict  = {}
+    gait_analysers: dict = {}
+    gait_anomaly_detectors: dict = {}
+    api_state = AppState(config=config) if AppState is not None else None
 
     # Initialize visualization
     logger.info("Initializing visualization")
@@ -439,8 +478,25 @@ def main():
             logger.info("Starting house visualization")
             house_visualizer.start()
 
-        # Create data processing thread
+        # Optional headless REST API for embedded integration
         import threading
+
+        if config.get("api", {}).get("enabled") and run_api_server is not None and api_state is not None:
+            logger.info(
+                "Starting REST API on %s:%s",
+                config["api"]["host"],
+                config["api"]["port"],
+            )
+            api_thread = threading.Thread(
+                target=run_api_server,
+                kwargs={
+                    "host": config["api"]["host"],
+                    "port": config["api"]["port"],
+                    "state": api_state,
+                },
+                daemon=True,
+            )
+            api_thread.start()
 
         import numpy as np
         import torch
@@ -534,6 +590,7 @@ def main():
                                 angle_threshold_deg=fall_cfg.get("angle_threshold_deg", 40.0),
                             )
                             gait_analysers[pid] = GaitAnalyzer()
+                            gait_anomaly_detectors[pid] = GaitAnomalyDetector()
 
                         if fall_enabled:
                             ev = fall_detectors[pid].update(
@@ -551,6 +608,17 @@ def main():
                         gait_analysers[pid].update(
                             person.keypoints, person.confidence, timestamp=ts_now
                         )
+                        gm_person = gait_analysers[pid].get_metrics()
+                        if gm_person is not None:
+                            anomaly = gait_anomaly_detectors[pid].update(gm_person)
+                            if anomaly.get("is_anomaly"):
+                                new_fall_events.append({
+                                    "person_id": pid,
+                                    "timestamp": ts_now,
+                                    "severity": int(FallSeverity.POSSIBLE_FALL),
+                                    "body_angle_deg": None,
+                                    "message": "Gait anomaly detected: " + "; ".join(anomaly.get("reasons", [])[:2]),
+                                })
 
                     # Collect gait metrics from first active person
                     gait_metrics_dict = None
@@ -593,6 +661,22 @@ def main():
                             gait_metrics=gait_metrics_dict,
                         )
 
+                    if api_state is not None:
+                        api_state.ingest({
+                            "tracked_people": [
+                                {"keypoints": t.keypoints.tolist() if hasattr(t.keypoints, "tolist") else t.keypoints,
+                                 "confidence": t.confidence.tolist() if hasattr(t.confidence, "tolist") else t.confidence,
+                                 "person_id": t.person_id}
+                                for t in tracked
+                            ],
+                            "gait_metrics": gait_metrics_dict,
+                            "csi_summary": {
+                                "amplitude_mean": float(np.mean(amplitude)),
+                                "phase_mean": float(np.mean(phase)),
+                            },
+                            "events": new_fall_events,
+                        })
+
                     if tracked:
                         rtmp_streamer.update_frame(
                             pose_data=first_person_dict,
@@ -616,9 +700,14 @@ def main():
         proc_thread.daemon = True
         proc_thread.start()
 
-        # Start dashboard (this will block until the dashboard is closed)
-        logger.info(f"Starting dashboard on port {config['dashboard']['port']}")
-        dashboard.run(debug=config["system"]["debug"], port=config["dashboard"]["port"])
+        # Start dashboard unless headless mode is requested
+        if config["system"].get("headless", False):
+            logger.info("Headless mode enabled; dashboard server not started")
+            while True:
+                time.sleep(1.0)
+        else:
+            logger.info(f"Starting dashboard on port {config['dashboard']['port']}")
+            dashboard.run(debug=config["system"]["debug"], port=config["dashboard"]["port"])
 
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, shutting down...")

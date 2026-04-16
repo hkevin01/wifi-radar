@@ -15,8 +15,10 @@ Fall detection and gait analysis over tracked pose sequences.
 """
 from .fall_detector import FallDetector, FallEvent, FallSeverity
 from .gait_analyzer import GaitAnalyzer, GaitMetrics, StepEvent
+from .gait_anomaly_detector import GaitAnomalyDetector
 
 __all__ = [
     "FallDetector", "FallEvent", "FallSeverity",
     "GaitAnalyzer", "GaitMetrics", "StepEvent",
+    "GaitAnomalyDetector",
 ]
