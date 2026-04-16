@@ -9,6 +9,7 @@
 [![ONNX](https://img.shields.io/badge/ONNX-1.15%2B-005CED?logo=onnx)](https://onnx.ai)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](docker/docker-compose.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](pyproject.toml)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 *Detect, track and analyse human poses through walls — no cameras required*
@@ -72,6 +73,7 @@ WiFi Router ──► CSI Collector ──► Signal Processor ──► Dual-Br
 | RTMP video stream (FFmpeg h264) | ✅ |
 | Docker stack — nginx-rtmp + HLS browser playback | ✅ |
 | Optional pygame house visualizer | ✅ |
+| Engineering-grade structured documentation on every class and method | ✅ |
 
 ---
 
@@ -79,7 +81,7 @@ WiFi Router ──► CSI Collector ──► Signal Processor ──► Dual-Br
 
 ### Software
 
-- Python **3.9 or newer**
+- Python **3.9 – 3.11** (Docker image uses `python:3.11-slim`)
 - Docker + Docker Compose (optional — for the full stack deployment)
 - FFmpeg on the host system (for RTMP push without Docker)
 - CUDA-capable GPU recommended; CPU-only works fine in simulation
@@ -377,7 +379,7 @@ docker compose -f docker/docker-compose.yml up --build
 
 | Container | Image | Role |
 |---|---|---|
-| `wifi-radar-app` | built from `docker/Dockerfile` | Python app, port 8050 |
+| `wifi-radar-app` | built from `docker/Dockerfile` | Python 3.11 app, port 8050 |
 | `wifi-radar-rtmp` | `alfg/nginx-rtmp` | RTMP ingest 1935, HLS 8080 |
 
 **Watch the stream in a browser:**
@@ -450,20 +452,20 @@ wifi-radar/
 │   ├── setup_venv.sh
 │   └── check_code.sh
 ├── docker/
-│   ├── Dockerfile                   # Python 3.11-slim + ffmpeg + OpenCV
+│   ├── Dockerfile                   # python:3.11-slim + ffmpeg + OpenCV
 │   ├── docker-compose.yml           # App + nginx-rtmp stack
 │   └── nginx-rtmp.conf              # RTMP ingest + HLS output config
 ├── tests/
 ├── weights/                         # Checkpoint files (gitignored except .gitkeep)
 │   └── .gitkeep
 ├── docs/
-│   ├── setup-guide.md
-│   ├── system_overview.md
-│   └── reference.md
+│   ├── # WiFi-Radar Setup Guide.md  # Router flashing + CSI tool setup
+│   ├── system_overview.md           # Full pipeline diagram and design notes
+│   └── reference.md                 # Bibliography and research references
 ├── requirements.txt                 # Runtime — numpy, torch, dash, onnx, …
 ├── requirements-dev.txt             # Dev — black, pytest, mypy, …
-├── pyproject.toml                   # PEP 517/518 build + tool configs
-└── setup.cfg
+├── pyproject.toml                   # PEP 517/518 build + tool configs (v1.0.0)
+└── setup.cfg                        # flake8, isort, mypy, black settings
 ```
 
 ---
@@ -506,6 +508,34 @@ phase[B,3,3,64]     ──► Conv branch P (3×Conv2d + BN + ReLU)   ─► Con
 
 ---
 
+## Code Documentation
+
+Every class and method in the codebase carries a **15-field structured comment
+block** applied uniformly across all modules:
+
+| Field | Description |
+|---|---|
+| `ID` | Unique identifier (e.g. `WR-MODEL-ENC-FWD-001`) |
+| `Requirement` | Clear, testable statement of what the code must do |
+| `Purpose` | Why this code exists and what objective it supports |
+| `Rationale` | Engineering reasoning behind the design choice |
+| `Inputs` | Types, units, valid ranges, constraints |
+| `Outputs` | Types, units, valid ranges, constraints |
+| `Preconditions` | Conditions that must be true before execution |
+| `Postconditions` | Conditions guaranteed to be true after execution |
+| `Assumptions` | Environment, hardware, timing, or data assumptions |
+| `Side Effects` | State changes, I/O operations, external interactions |
+| `Failure Modes` | Possible failure causes and mitigations |
+| `Error Handling` | Response to invalid inputs or unexpected states |
+| `Constraints` | Timing, memory, precision, or safety constraints |
+| `Verification` | How the code will be tested, inspected, or validated |
+| `References` | Standards, requirement docs, or algorithms implemented |
+
+This makes every component independently auditable without needing to trace
+execution through the full pipeline.
+
+---
+
 ## Development
 
 ```bash
@@ -535,7 +565,7 @@ python scripts/export_onnx.py --weights weights/simulation_baseline.pth
 
 ## Router Setup (Real-World Mode)
 
-See [docs/setup-guide.md](docs/%23%20WiFi-Radar%20Setup%20Guide.md) for:
+See [docs/# WiFi-Radar Setup Guide.md](<docs/%23%20WiFi-Radar%20Setup%20Guide.md>) for:
 
 - Flashing OpenWrt firmware with CSI extraction patches
 - Configuring `ath9k` or Intel 5300 CSI tools
@@ -560,6 +590,21 @@ Full bibliography: [docs/reference.md](docs/reference.md)
 
 ---
 
+## Changelog
+
+### v1.0.0
+- Initial release: CSI collection, simulation mode, signal processing, dual-branch CNN encoder
+- LSTM pose estimator (17 keypoints, 3-D) with multi-person tracking
+- Fall detection (4-state FSM) and gait analysis (cadence, stride, symmetry, speed)
+- 3-tab Dash dashboard — Monitor, Events, Configuration
+- RTMP streaming via FFmpeg subprocess
+- ONNX export with onnxruntime validation
+- Docker stack with nginx-rtmp + HLS playback
+- Simulation-baseline training script
+- 15-field structured comment documentation on every class and method
+
+---
+
 ## Roadmap
 
 - [x] Pre-trained model weights (simulation baseline)
@@ -568,6 +613,12 @@ Full bibliography: [docs/reference.md](docs/reference.md)
 - [x] ONNX export for edge deployment
 - [x] Docker container with RTMP server included
 - [x] Web UI configuration panel
+- [x] Engineering-grade structured documentation (all classes + methods)
+- [ ] Transfer learning from real-world CSI datasets
+- [ ] TensorRT optimisation for Jetson Nano deployment
+- [ ] REST API for headless / embedded integration
+- [ ] Automated test suite with coverage reporting
+- [ ] Anomaly detection for unusual gait patterns
 
 ---
 
