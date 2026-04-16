@@ -398,6 +398,9 @@ def main():
     csi_collector = CSICollector(
         router_ip=config["router"]["ip"], port=config["router"]["port"]
     )
+    if args.record:
+        csi_collector.enable_recording(args.output_dir)
+        logger.info("CSI recording enabled: output_dir=%s", os.path.expanduser(args.output_dir))
 
     # Initialize signal processing
     logger.info("Initializing signal processing")
@@ -467,7 +470,10 @@ def main():
         # Start data collection
         logger.info("Starting CSI data collection")
         csi_collector.sim_num_people = config["system"].get("num_people", 1)
-        csi_collector.start(simulation_mode=config["system"]["simulation_mode"])
+        csi_collector.start(
+            simulation_mode=config["system"]["simulation_mode"] and not bool(args.replay),
+            replay_file=args.replay,
+        )
 
         # Start RTMP streaming
         logger.info("Starting RTMP streaming")

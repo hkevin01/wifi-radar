@@ -487,6 +487,22 @@ class GaitAnalyzer:
             np.mean; WR-ANALYSIS-GAIT-001.
         """
         def mean_interval(steps: List[StepEvent]) -> Optional[float]:
+            """Compute mean positive inter-step interval from a list of StepEvents.
+
+            ID: WR-ANALYSIS-GAIT-MEANINTERVAL-001
+            Requirement: Return the mean of all positive consecutive time deltas
+                         between StepEvents, or None if fewer than 2 events.
+            Purpose: Provide left/right mean step intervals for symmetry calculation
+                     while filtering out any spurious zero or negative timestamps.
+            Inputs:
+                steps — List[StepEvent]: ordered list of foot-strike events.
+            Outputs:
+                Optional[float] — mean positive interval in seconds; None if < 2 steps.
+            Side Effects: None.
+            Failure Modes: All intervals <= 0 returns None.
+            Verification: [0.5s, 0.5s] → 0.5; single step → None.
+            References: WR-ANALYSIS-GAIT-001.
+            """
             if len(steps) < 2:
                 return None
             intervals = [steps[i].timestamp - steps[i - 1].timestamp

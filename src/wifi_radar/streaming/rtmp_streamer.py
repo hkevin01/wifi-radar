@@ -36,8 +36,88 @@ import subprocess
 import threading
 import time
 
-import cv2
 import numpy as np
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+
+def _clip_point(width, height, x_pos, y_pos):
+    """Clamp a point to the frame bounds."""
+    return (
+        max(0, min(width - 1, int(x_pos))),
+        max(0, min(height - 1, int(y_pos))),
+    )
+
+
+def _draw_circle(frame, center, radius, color, thickness=-1):
+    """Draw a filled marker with OpenCV when available, otherwise via NumPy."""
+    if cv2 is not None:
+        cv2.circle(frame, center, radius, color, thickness)
+        return
+
+    x_pos, y_pos = _clip_point(frame.shape[1], frame.shape[0], *center)
+    radius = max(1, int(radius))
+    y0, y1 = max(0, y_pos - radius), min(frame.shape[0], y_pos + radius + 1)
+    x0, x1 = max(0, x_pos - radius), min(frame.shape[1], x_pos + radius + 1)
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    mask = (xx - x_pos) ** 2 + (yy - y_pos) ** 2 <= radius ** 2
+    frame[y0:y1, x0:x1][mask] = color
+
+
+def _draw_line(frame, pt1, pt2, color, thickness=1):
+    """Draw a line segment using OpenCV or a lightweight NumPy fallback."""
+    if cv2 is not None:
+        cv2.line(frame, pt1, pt2, color, thickness)
+        return
+
+    x1, y1 = _clip_point(frame.shape[1], frame.shape[0], *pt1)
+    x2, y2 = _clip_point(frame.shape[1], frame.shape[0], *pt2)
+    steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+    xs = np.linspace(x1, x2, steps + 1).astype(int)
+    ys = np.linspace(y1, y2, steps + 1).astype(int)
+    half = max(1, int(thickness)) // 2
+    for x_pos, y_pos in zip(xs, ys):
+        y0, y1 = max(0, y_pos - half), min(frame.shape[0], y_pos + half + 1)
+        x0, x1 = max(0, x_pos - half), min(frame.shape[1], x_pos + half + 1)
+        frame[y0:y1, x0:x1] = color
+
+
+def _draw_rectangle(frame, pt1, pt2, color, thickness=1):
+    """Draw a rectangle around the frame bounds."""
+    if cv2 is not None:
+        cv2.rectangle(frame, pt1, pt2, color, thickness)
+        return
+
+    x1, y1 = _clip_point(frame.shape[1], frame.shape[0], *pt1)
+    x2, y2 = _clip_point(frame.shape[1], frame.shape[0], *pt2)
+    frame[y1:y1 + thickness, x1:x2 + 1] = color
+    frame[max(y1, y2 - thickness + 1):y2 + 1, x1:x2 + 1] = color
+    frame[y1:y2 + 1, x1:x1 + thickness] = color
+    frame[y1:y2 + 1, max(x1, x2 - thickness + 1):x2 + 1] = color
+
+
+def _put_text(frame, text, origin, scale, color, thickness=1):
+    """Render text with OpenCV, or a minimal marker when unavailable."""
+    if cv2 is not None:
+        cv2.putText(
+            frame,
+            text,
+            origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            color,
+            thickness,
+        )
+        return
+
+    x_pos, y_pos = _clip_point(frame.shape[1], frame.shape[0], *origin)
+    width = min(frame.shape[1] - x_pos, max(12, int(len(text) * 4 * max(scale, 0.5))))
+    height = min(frame.shape[0] - y_pos, max(6, int(8 * max(scale, 0.5))))
+    if width > 0 and height > 0:
+        frame[y_pos:y_pos + height, x_pos:x_pos + width] = color
 
 
 class RTMPStreamer:
@@ -315,14 +395,13 @@ class RTMPStreamer:
                     color = (0, color_value, 255 - color_value)
 
                     # Draw circle for keypoint
-                    cv2.circle(frame, (x_pos, y_pos), 5, color, -1)
+                    _draw_circle(frame, (x_pos, y_pos), 5, color, -1)
 
                     # Draw keypoint index
-                    cv2.putText(
+                    _put_text(
                         frame,
                         str(i),
                         (x_pos + 5, y_pos - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX,
                         0.5,
                         (255, 255, 255),
                         1,
@@ -333,19 +412,18 @@ class RTMPStreamer:
                 if valid_mask[edge[0]] and valid_mask[edge[1]]:
                     pt1 = (x_scaled[edge[0]], y_scaled[edge[0]])
                     pt2 = (x_scaled[edge[1]], y_scaled[edge[1]])
-                    cv2.line(frame, pt1, pt2, (0, 255, 0), 2)
+                    _draw_line(frame, pt1, pt2, (0, 255, 0), 2)
 
             # Add border
-            cv2.rectangle(
+            _draw_rectangle(
                 frame, (0, 0), (self.width - 1, self.height - 1), (255, 255, 255), 1
             )
 
             # Add title
-            cv2.putText(
+            _put_text(
                 frame,
                 "WiFi-Radar: Human Pose Estimation",
                 (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
                 (255, 255, 255),
                 2,
@@ -355,11 +433,10 @@ class RTMPStreamer:
             avg_confidence = (
                 np.mean(confidence[valid_mask]) if np.any(valid_mask) else 0
             )
-            cv2.putText(
+            _put_text(
                 frame,
                 f"Confidence: {avg_confidence:.2f}",
                 (10, self.height - 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (200, 200, 0),
                 1,

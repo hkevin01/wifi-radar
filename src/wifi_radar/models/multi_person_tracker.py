@@ -279,6 +279,25 @@ class MultiPersonPoseEstimator(nn.Module):
             nn.init.kaiming_normal_; nn.init.orthogonal_; WR-MODEL-MPT-MPPE-INIT-001.
         """
         def _init(m):
+            """Apply Kaiming (Linear) or Orthogonal (LSTM) weight initialisation.
+
+            ID: WR-MODEL-MPT-INIT-LOCAL-001
+            Requirement: Initialise nn.Linear weights with Kaiming-normal (fan_in)
+                         and nn.LSTM weights with orthogonal initialisation; set all
+                         biases to zero.
+            Purpose: Provide stable gradient flow at the start of training for both
+                     fully-connected and recurrent layers.
+            Rationale: Kaiming fan_in suits ReLU activations; orthogonal init for
+                       LSTM gates prevents vanishing/exploding gradients.
+            Inputs:
+                m — nn.Module: visited module (called by self.apply()).
+            Outputs:
+                None — modifies m.weight and m.bias in-place.
+            Side Effects: Modifies m.weight and m.bias in-place.
+            Failure Modes: Non-Linear/LSTM modules are silently skipped.
+            Verification: Check initial weight norms after apply(_init).
+            References: nn.init.kaiming_normal_; nn.init.orthogonal_.
+            """
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
                 if m.bias is not None:

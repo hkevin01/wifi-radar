@@ -17,6 +17,7 @@ import socket
 import struct
 import threading
 import time
+from pathlib import Path
 from queue import Queue
 
 import numpy as np
@@ -101,8 +102,13 @@ class CSICollector:
 
         # Flag toggled by start(); simulation thread checks this to select CSI source.
         self.simulation_mode = True
+        self.replay_file = None
+        self.record_enabled = False
+        self.record_output_dir = None
+        self._recorded_amplitude = []
+        self._recorded_phase = []
 
-    def start(self, simulation_mode=True):
+    def start(self, simulation_mode=True, replay_file=None):
         """Start CSI data collection in a background daemon thread.
 
         ID: WR-DATA-CSI-START-001
@@ -139,9 +145,18 @@ class CSICollector:
             threading.Thread daemon flag; _simulate_csi_data(), _collect_csi_data().
         """
         self.simulation_mode = simulation_mode
+        self.replay_file = replay_file
         self.running = True
+        self._recorded_amplitude = []
+        self._recorded_phase = []
 
-        if simulation_mode:
+        if replay_file:
+            self.logger.info("Starting CSI collector replay from %s", replay_file)
+            self.collection_thread = threading.Thread(
+                target=self._replay_csi_data,
+                args=(replay_file,),
+            )
+        elif simulation_mode:
             self.logger.info("Starting CSI collector in simulation mode")
             self.collection_thread = threading.Thread(target=self._simulate_csi_data)
         else:
@@ -196,6 +211,7 @@ class CSICollector:
         self.running = False
         if hasattr(self, "collection_thread"):
             self.collection_thread.join(timeout=1.0)
+        self._flush_recording()
         self.logger.info("CSI collector stopped")
 
     def get_csi_data(self, block=True, timeout=None):
@@ -286,9 +302,7 @@ class CSICollector:
                     continue
 
                 amplitude, phase = self._parse_csi_data(raw_data)
-
-                if not self.csi_data_queue.full():
-                    self.csi_data_queue.put((amplitude, phase))
+                self._publish_frame(amplitude, phase)
 
         except Exception as e:
             self.logger.error(f"Error in CSI collection: {e}")
@@ -351,11 +365,187 @@ class CSICollector:
                                          float(np.clip(y, 0.05, 0.95))))
 
             self._add_simulated_human_presence(amplitude, phase, people_positions)
-
-            if not self.csi_data_queue.full():
-                self.csi_data_queue.put((amplitude, phase))
+            self._publish_frame(amplitude, phase)
 
             time.sleep(0.05)  # 20 Hz sampling rate
+
+    def enable_recording(self, output_dir):
+        """Enable capture recording to compressed session files.
+
+        ID: WR-DATA-CSI-RECORD-001
+        Requirement: Turn on frame recording and ensure the target output
+                     directory exists before collection starts.
+        Purpose: Preserve live or simulated CSI sessions for later replay,
+                 transfer learning, and offline validation.
+        Rationale: Writing recordings only when explicitly enabled avoids
+                   unnecessary disk I/O during ordinary interactive runs.
+        Inputs:
+            output_dir — str or path-like: destination directory for .npz captures.
+        Outputs:
+            None — updates recorder state on self.
+        Preconditions:
+            Caller supplies a writable filesystem path.
+        Postconditions:
+            self.record_enabled == True and self.record_output_dir exists.
+        Assumptions:
+            The operator has sufficient disk space for the capture session.
+        Side Effects:
+            Creates the output directory if needed.
+        Failure Modes:
+            Filesystem permission errors propagate from mkdir().
+        Error Handling:
+            No local catch; caller sees the filesystem exception.
+        Constraints:
+            Recording is append-in-memory during runtime and flushed on stop().
+        Verification:
+            Integration test: enable_recording(); start replay; stop(); assert a file is created.
+        References:
+            pathlib.Path.mkdir; numpy.savez_compressed.
+        """
+        self.record_enabled = True
+        self.record_output_dir = Path(output_dir).expanduser()
+        self.record_output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _publish_frame(self, amplitude, phase):
+        """Publish one CSI frame to the queue and optional recorder.
+
+        ID: WR-DATA-CSI-PUBLISH-001
+        Requirement: Normalise one frame pair to float32, optionally append it
+                     to the recording buffers, and enqueue it when capacity allows.
+        Purpose: Centralise queue publication so collection, simulation, and replay
+                 all share identical output and recording behaviour.
+        Rationale: One helper avoids duplication and ensures new ingestion paths
+                   cannot forget to honour the recording flag.
+        Inputs:
+            amplitude — array-like: CSI amplitude tensor for one frame.
+            phase     — array-like: CSI phase tensor for one frame.
+        Outputs:
+            None — writes to queue / recorder as side effects.
+        Preconditions:
+            amplitude and phase have matching CSI tensor shapes.
+        Postconditions:
+            Frame is buffered for consumers unless the queue is full.
+        Assumptions:
+            Frame rate is moderate enough for in-memory buffering.
+        Side Effects:
+            Appends to self._recorded_amplitude / self._recorded_phase.
+            Pushes a tuple into self.csi_data_queue when space is available.
+        Failure Modes:
+            Queue full: frame is dropped rather than blocking the producer.
+        Error Handling:
+            No explicit catch; numpy conversion errors propagate.
+        Constraints:
+            Uses float32 to bound memory usage during long captures.
+        Verification:
+            Unit test: call _publish_frame(); assert get_csi_data() returns arrays.
+        References:
+            numpy.asarray; queue.Queue.put.
+        """
+        amplitude = np.asarray(amplitude, dtype=np.float32)
+        phase = np.asarray(phase, dtype=np.float32)
+
+        if self.record_enabled:
+            self._recorded_amplitude.append(amplitude.copy())
+            self._recorded_phase.append(phase.copy())
+
+        if not self.csi_data_queue.full():
+            self.csi_data_queue.put((amplitude, phase))
+
+    def _flush_recording(self):
+        """Persist any recorded frames to disk at shutdown.
+
+        ID: WR-DATA-CSI-FLUSH-001
+        Requirement: Write the buffered amplitude and phase frame history to a
+                     compressed .npz file and clear the in-memory buffers.
+        Purpose: Finalise an explicit recording session so captured data can be
+                 reused by validation and training workflows.
+        Rationale: Delayed flush avoids repeated per-frame disk writes while the
+                   collector is running in real time.
+        Inputs:
+            None — reads recorder state from self.
+        Outputs:
+            None — writes a compressed capture file as a side effect.
+        Preconditions:
+            Recording must be enabled and frames must have been buffered.
+        Postconditions:
+            Buffered frames are saved to disk and the buffers are cleared.
+        Assumptions:
+            All recorded frames share the same tensor shape.
+        Side Effects:
+            Creates a timestamped .npz file in the output directory.
+        Failure Modes:
+            Disk write failure propagates from numpy.savez_compressed().
+        Error Handling:
+            No local catch; the caller sees the write failure.
+        Constraints:
+            Uses a timestamped filename to avoid clobbering earlier sessions.
+        Verification:
+            Integration test: record frames; stop(); open the saved .npz and verify shape.
+        References:
+            time.strftime; numpy.savez_compressed.
+        """
+        if not self.record_enabled or not self._recorded_amplitude:
+            return
+
+        output_dir = self.record_output_dir or Path("~/wifi_data").expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        output_path = output_dir / f"csi_capture_{stamp}.npz"
+        np.savez_compressed(
+            output_path,
+            amplitude=np.stack(self._recorded_amplitude, axis=0),
+            phase=np.stack(self._recorded_phase, axis=0),
+        )
+        self.logger.info("Saved %d recorded CSI frames to %s", len(self._recorded_amplitude), output_path)
+        self._recorded_amplitude.clear()
+        self._recorded_phase.clear()
+
+    def _replay_csi_data(self, replay_file):
+        """Replay a previously recorded CSI capture into the live queue.
+
+        ID: WR-DATA-CSI-REPLAY-001
+        Requirement: Load a saved capture file, iterate frame-by-frame in time
+                     order, and publish each frame into the live queue at ~20 Hz.
+        Purpose: Support offline validation and reproducible regression testing
+                 using previously recorded live-hardware sessions.
+        Rationale: Replaying captures through the same queue interface exercises
+                   the production pipeline without requiring router hardware.
+        Inputs:
+            replay_file — str or path-like: path to a supported capture file.
+        Outputs:
+            None — writes frames to the live queue as a side effect.
+        Preconditions:
+            self.running == True and replay_file points to a valid .npz/.npy capture.
+        Postconditions:
+            All replay frames are published or replay stops early if self.running becomes False.
+        Assumptions:
+            The capture file contains amplitude/phase tensors with a frame axis.
+        Side Effects:
+            Imports the validation loader and publishes frames into the queue.
+        Failure Modes:
+            File missing or malformed: exception caught and logged.
+        Error Handling:
+            Exceptions are logged and the replay loop exits cleanly.
+        Constraints:
+            Uses a fixed 50 ms cadence to emulate the live collector rate.
+        Verification:
+            Unit test: replay a temp .npz file; assert get_csi_data() returns one frame.
+        References:
+            wifi_radar.utils.live_capture_validation.load_capture_file.
+        """
+        try:
+            from wifi_radar.utils.live_capture_validation import load_capture_file
+
+            amplitude_frames, phase_frames = load_capture_file(str(replay_file))
+            for amplitude, phase in zip(amplitude_frames, phase_frames):
+                if not self.running:
+                    break
+                self._publish_frame(amplitude, phase)
+                time.sleep(0.05)
+        except Exception as exc:
+            self.logger.error("Error replaying CSI capture %s: %s", replay_file, exc)
+        finally:
+            self.running = False
 
     def _parse_csi_data(self, raw_data):
         """Parse raw bytes received from the router firmware into amplitude/phase arrays.
