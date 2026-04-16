@@ -560,6 +560,17 @@ Full bibliography: [docs/reference.md](docs/reference.md)
 
 ---
 
+## Roadmap
+
+- [x] Pre-trained model weights (simulation baseline)
+- [x] Multi-person pose clustering
+- [x] Fall detection and gait analysis
+- [x] ONNX export for edge deployment
+- [x] Docker container with RTMP server included
+- [x] Web UI configuration panel
+
+---
+
 ## Contributing
 
 Pull requests are welcome! Please read
