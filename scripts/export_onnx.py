@@ -38,21 +38,177 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 # ─────────────────────────────────────────────────────────────────────────── #
 
 class _EncoderWrapper(torch.nn.Module):
+    """Thin wrapper that exposes DualBranchEncoder as a simple 2-input ONNX graph.
+
+    ID: WR-SCRIPT-ONNX-ENCWRAP-001
+    Requirement: Wrap DualBranchEncoder so torch.onnx.export sees exactly two
+                 named inputs (amplitude, phase) and one output (features).
+    Purpose: Prevent ONNX trace errors caused by tuple inputs or internal state;
+             provides a clean interface for edge runtime inference.
+    Rationale: A wrapper module isolates torch.onnx.export from optional hidden
+               states or extra return values the encoder might add in future.
+    Inputs:
+        encoder — DualBranchEncoder: trained encoder instance.
+    Outputs:
+        None — wraps encoder in self.encoder for forward dispatch.
+    Preconditions:
+        DualBranchEncoder must be importable.
+    Postconditions:
+        self.encoder holds a reference to the passed encoder instance.
+    Assumptions:
+        DualBranchEncoder.forward(amplitude, phase) returns a single Tensor.
+    Side Effects:
+        None.
+    Failure Modes:
+        None.
+    Error Handling:
+        None.
+    Constraints:
+        None.
+    Verification:
+        Unit test: instantiate wrapper; assert wrapper.encoder is encoder.
+    References:
+        DualBranchEncoder; WR-SCRIPT-ONNX-001.
+    """
+
     def __init__(self, encoder: DualBranchEncoder) -> None:
+        """Initialise the encoder wrapper.
+
+        ID: WR-SCRIPT-ONNX-ENCWRAP-INIT-001
+        Requirement: Call super().__init__() and store encoder as self.encoder.
+        Purpose: Register the encoder as a sub-module so its parameters are
+                 included in the ONNX export.
+        Rationale: torch.nn.Module sub-module registration ensures parameter
+                   export by torch.onnx.export with export_params=True.
+        Inputs:
+            encoder — DualBranchEncoder: trained encoder.
+        Outputs:
+            None.
+        Preconditions:
+            None.
+        Postconditions:
+            self.encoder is set.
+        Assumptions: None.
+        Side Effects: None.
+        Failure Modes: None.
+        Error Handling: None.
+        Constraints: None.
+        Verification: assert _EncoderWrapper(enc).encoder is enc.
+        References: torch.nn.Module.__init__; WR-SCRIPT-ONNX-ENCWRAP-001.
+        """
         super().__init__()
         self.encoder = encoder
 
     def forward(self, amplitude: torch.Tensor, phase: torch.Tensor) -> torch.Tensor:
+        """Run the encoder forward pass.
+
+        ID: WR-SCRIPT-ONNX-ENCWRAP-FWD-001
+        Requirement: Delegate to self.encoder(amplitude, phase) and return features.
+        Purpose: Provide a clean 2-input ONNX graph node for the encoder.
+        Rationale: Direct delegation keeps the wrapper transparent.
+        Inputs:
+            amplitude — Tensor (B,3,3,64) float32.
+            phase     — Tensor (B,3,3,64) float32.
+        Outputs:
+            features — Tensor (B,256) float32.
+        Preconditions:
+            self.encoder must be in eval mode before ONNX export.
+        Postconditions:
+            Output shape (B,256).
+        Assumptions: None.
+        Side Effects: None.
+        Failure Modes: None.
+        Error Handling: None.
+        Constraints: None.
+        Verification: assert wrapper(amp, phase).shape == (B, 256).
+        References: DualBranchEncoder.forward; WR-SCRIPT-ONNX-ENCWRAP-001.
+        """
         return self.encoder(amplitude, phase)
 
 
 class _PoseEstimatorWrapper(torch.nn.Module):
-    """Single-frame (no sequence) pose estimator — hides the LSTM hidden state."""
+    """Single-frame (no sequence) pose estimator — hides the LSTM hidden state.
+
+    ID: WR-SCRIPT-ONNX-POSEWRAP-001
+    Requirement: Wrap PoseEstimator so torch.onnx.export sees one input (features)
+                 and two outputs (keypoints, confidence), with no hidden state.
+    Purpose: Strip the LSTM hidden state tuple from the return value because
+             ONNX does not support optional tuple outputs natively.
+    Rationale: Returning only (keypoints, confidence) maps cleanly to two named
+               ONNX output tensors without needing sequence-level state.
+    Inputs:
+        pose_estimator — PoseEstimator: trained estimator instance.
+    Outputs:
+        None — wraps estimator in self.pe.
+    Preconditions:
+        PoseEstimator must be importable.
+    Postconditions:
+        self.pe holds a reference to the passed estimator instance.
+    Assumptions:
+        PoseEstimator.forward(features, hidden=None) returns (kp, conf, hidden).
+    Side Effects:
+        None.
+    Failure Modes:
+        None.
+    Error Handling:
+        None.
+    Constraints:
+        None.
+    Verification:
+        Unit test: instantiate wrapper; assert wrapper.pe is pose_estimator.
+    References:
+        PoseEstimator; WR-SCRIPT-ONNX-001.
+    """
+
     def __init__(self, pose_estimator: PoseEstimator) -> None:
+        """Initialise the pose estimator wrapper.
+
+        ID: WR-SCRIPT-ONNX-POSEWRAP-INIT-001
+        Requirement: Call super().__init__() and store pose_estimator as self.pe.
+        Purpose: Register the pose estimator as a sub-module for ONNX parameter export.
+        Rationale: torch.nn.Module sub-module registration ensures parameter inclusion.
+        Inputs:
+            pose_estimator — PoseEstimator: trained estimator.
+        Outputs: None.
+        Preconditions: None.
+        Postconditions: self.pe is set.
+        Assumptions: None.
+        Side Effects: None.
+        Failure Modes: None.
+        Error Handling: None.
+        Constraints: None.
+        Verification: assert _PoseEstimatorWrapper(pe).pe is pe.
+        References: torch.nn.Module.__init__; WR-SCRIPT-ONNX-POSEWRAP-001.
+        """
         super().__init__()
         self.pe = pose_estimator
 
     def forward(self, features: torch.Tensor):
+        """Run the pose estimator forward pass, discarding hidden state.
+
+        ID: WR-SCRIPT-ONNX-POSEWRAP-FWD-001
+        Requirement: Delegate to self.pe(features, hidden=None) and return only
+                     (keypoints, confidence).
+        Purpose: Provide a clean single-input ONNX graph node.
+        Rationale: Discarding the hidden state tuple makes the ONNX graph
+                   exportable without sequence-level state management.
+        Inputs:
+            features — Tensor (B,256) float32.
+        Outputs:
+            keypoints   — Tensor (B,17,3) float32.
+            confidence  — Tensor (B,17) float32.
+        Preconditions:
+            self.pe must be in eval mode before ONNX export.
+        Postconditions:
+            keypoints.shape == (B,17,3); confidence.shape == (B,17).
+        Assumptions: None.
+        Side Effects: None.
+        Failure Modes: None.
+        Error Handling: None.
+        Constraints: None.
+        Verification: assert wrapper(feat)[0].shape == (B,17,3).
+        References: PoseEstimator.forward; WR-SCRIPT-ONNX-POSEWRAP-001.
+        """
         keypoints, confidence, _ = self.pe(features, hidden=None)
         return keypoints, confidence
 
@@ -69,28 +225,41 @@ def export_encoder(
 ) -> None:
     """Export DualBranchEncoder to ONNX format.
 
-    ONNX export rationale:
-        - ``export_params=True``: Embed trained weights in the .onnx file so the
-          runtime does not need a separate parameter file.
-        - ``do_constant_folding=True``: Pre-compute static sub-expressions at
-          export time (e.g. BatchNorm fused into Conv weights) to reduce runtime
-          inference latency.
-        - ``dynamic_axes``: Only the batch dimension is dynamic; spatial and
-          channel dimensions are fixed at (3, 3, 64) as documented in the model.
-          Making the batch axis dynamic allows the runtime to serve arbitrary
-          batch sizes without re-exporting.
-        - Opset 17 (default): First opset with ``AdaptiveAveragePool`` support
-          required by DualBranchEncoder.  Pass ``--opset 18`` to target newer runtimes.
-
-    Args:
-        encoder:     Trained (or random-initialised) DualBranchEncoder in eval mode.
-        output_path: Destination file path (e.g. ``weights/encoder.onnx``).
-        opset:       ONNX opset version (≥ 17 required for AdaptiveAvgPool).
-        batch:       Batch size for the dummy input used during tracing.
-
+    ID: WR-SCRIPT-ONNX-EXPENC-001
+    Requirement: Trace DualBranchEncoder with a dummy (B,3,3,64) input pair and
+                 write an ONNX model file to output_path.
+    Purpose: Produce a portable ONNX graph for edge deployment without a PyTorch
+             runtime dependency.
+    Rationale: export_params=True embeds weights; do_constant_folding=True fuses
+               BatchNorm into Conv to reduce runtime latency.
+    Inputs:
+        encoder     — DualBranchEncoder: trained model in eval mode.
+        output_path — str: destination .onnx file path.
+        opset       — int >=17: ONNX opset version.
+        batch       — int: batch size for dummy input.
+    Outputs:
+        None — writes ONNX file to output_path.
+    Preconditions:
+        encoder.eval() must have been called.
+        torch.onnx must be available.
+    Postconditions:
+        output_path file exists and is a valid ONNX model.
+    Assumptions:
+        Input spatial dims are always (3,3,64); only batch dim is dynamic.
     Side Effects:
-        Writes an ONNX model file to ``output_path``.
-        Logs an info message on success.
+        Writes to filesystem.
+        Logs an INFO message on success.
+    Failure Modes:
+        Opset < 17: AdaptiveAvgPool unsupported; export raises RuntimeError.
+        output_path unwritable: raises IOError.
+    Error Handling:
+        None; exceptions propagate to caller.
+    Constraints:
+        opset >= 17 required for AdaptiveAveragePool.
+    Verification:
+        Integration test: export and load with onnx.load; check_model passes.
+    References:
+        torch.onnx.export; WR-SCRIPT-ONNX-001.
     """
     model.eval()
 
@@ -123,25 +292,38 @@ def export_pose_estimator(
 ) -> None:
     """Export PoseEstimator (single-frame, no LSTM hidden state) to ONNX.
 
-    ONNX export rationale:
-        - ``_PoseEstimatorWrapper`` strips the LSTM hidden-state tuple from
-          the return value because ONNX does not support optional tuple outputs
-          natively.  The wrapper returns only (keypoints, confidence), which
-          map cleanly to two named ONNX output tensors.
-        - ``do_constant_folding=True``: Fuses the sigmoid activations in the
-          confidence head where possible.
-        - The feature input axis is the only dynamic axis; keypoint count and
-          coordinate dimension are always (17, 3) at inference time.
-
-    Args:
-        pose_estimator: Trained PoseEstimator in eval mode.
-        output_path:    Destination file path (e.g. ``weights/pose_estimator.onnx``).
-        opset:          ONNX opset version.
-        batch:          Batch size for the dummy input tensor.
-
+    ID: WR-SCRIPT-ONNX-EXPPOSE-001
+    Requirement: Trace _PoseEstimatorWrapper with a dummy (B,256) feature input
+                 and write an ONNX model file to output_path.
+    Purpose: Produce an ONNX pose estimator graph suitable for edge deployment.
+    Rationale: _PoseEstimatorWrapper strips the LSTM hidden state so the ONNX
+               graph has a clean (features) -> (keypoints, confidence) signature.
+    Inputs:
+        pose_estimator — PoseEstimator: trained model in eval mode.
+        output_path    — str: destination .onnx file path.
+        opset          — int: ONNX opset version.
+        batch          — int: batch size for dummy input.
+    Outputs:
+        None — writes ONNX file to output_path.
+    Preconditions:
+        pose_estimator.eval() must have been called.
+    Postconditions:
+        output_path file exists and is a valid ONNX model.
+    Assumptions:
+        Feature vector is always 256-d; only batch dim is dynamic.
     Side Effects:
-        Writes an ONNX model file to ``output_path``.
-        Logs an info message on success.
+        Writes to filesystem.
+        Logs an INFO message on success.
+    Failure Modes:
+        output_path unwritable: raises IOError.
+    Error Handling:
+        None; exceptions propagate to caller.
+    Constraints:
+        None.
+    Verification:
+        Integration test: export and load with onnx.load; check_model passes.
+    References:
+        _PoseEstimatorWrapper; torch.onnx.export; WR-SCRIPT-ONNX-001.
     """
     model.eval()
 
@@ -171,7 +353,47 @@ def validate_with_onnxruntime(
     encoder_path:     str,
     pose_est_path:    str,
 ) -> None:
-    """Run a forward pass in PyTorch and ONNX Runtime and compare outputs."""
+    """Run a forward pass in PyTorch and ONNX Runtime and compare outputs.
+
+    ID: WR-SCRIPT-ONNX-VALIDATE-001
+    Requirement: Load the exported ONNX files with onnxruntime, run inference
+                 on the same random input as the PyTorch reference, and assert
+                 that max absolute difference < 1e-4 for both models.
+    Purpose: Confirm that the ONNX export is numerically equivalent to the
+             PyTorch models before deploying to edge hardware.
+    Rationale: Float32 numerics may differ slightly between PyTorch and ORT
+               due to different kernel implementations; 1e-4 tolerance is
+               conservative enough to catch export bugs without false positives.
+    Inputs:
+        encoder        — DualBranchEncoder: PyTorch reference model in eval mode.
+        pose_estimator — PoseEstimator: PyTorch reference model in eval mode.
+        encoder_path   — str: path to exported encoder.onnx.
+        pose_est_path  — str: path to exported pose_estimator.onnx.
+    Outputs:
+        None — logs results; raises AssertionError on mismatch.
+    Preconditions:
+        Both ONNX files must exist.
+        onnxruntime must be installed.
+    Postconditions:
+        Both max diffs are < 1e-4 or AssertionError is raised.
+    Assumptions:
+        CPUExecutionProvider is available in onnxruntime.
+    Side Effects:
+        Logs INFO messages with max diffs.
+        Logs WARNING if onnxruntime or onnx not installed.
+    Failure Modes:
+        onnxruntime not installed: logs warning; returns early.
+        onnx not installed: skips model check; continues.
+        Max diff >= 1e-4: AssertionError.
+    Error Handling:
+        ImportError caught for onnxruntime and onnx; warning logged.
+    Constraints:
+        Uses batch size 4 for the validation forward pass.
+    Verification:
+        Integration test: run after export; assert no AssertionError.
+    References:
+        onnxruntime.InferenceSession; onnx.checker.check_model; WR-SCRIPT-ONNX-001.
+    """
     try:
         import onnxruntime as ort
     except ImportError:
@@ -225,7 +447,37 @@ def validate_with_onnxruntime(
 # ─────────────────────────────────────────────────────────────────────────── #
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Export WiFi-Radar models to ONNX")
+    """Parse CLI arguments for the ONNX export script.
+
+    ID: WR-SCRIPT-ONNX-PARSEARGS-001
+    Requirement: Define and parse --weights, --opset, --output-dir, --validate,
+                 and --no-validate arguments; return a Namespace with defaults.
+    Purpose: Allow operators to control output location, opset version, and
+             validation without modifying source code.
+    Rationale: argparse provides automatic --help, type coercion, and defaults.
+    Inputs:
+        sys.argv — CLI arguments.
+    Outputs:
+        argparse.Namespace with: weights, opset, output_dir, validate.
+    Preconditions:
+        Called before main().
+    Postconditions:
+        All argument fields populated.
+    Assumptions:
+        Default opset=17 is compatible with current DualBranchEncoder.
+    Side Effects:
+        May call sys.exit(2) on invalid arguments.
+    Failure Modes:
+        Invalid argument: argparse raises SystemExit.
+    Error Handling:
+        Handled by argparse.
+    Constraints:
+        --validate and --no-validate are mutually exclusive via dest='validate'.
+    Verification:
+        Unit test: call with []; assert args.opset == 17.
+    References:
+        argparse.ArgumentParser; WR-SCRIPT-ONNX-001.
+    """
     p.add_argument("--weights",    default=None,         help="Path to .pth checkpoint (optional)")
     p.add_argument("--opset",      type=int, default=17, help="ONNX opset version (default 17)")
     p.add_argument("--output-dir", default="weights",    help="Directory for .onnx files")
@@ -238,20 +490,41 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Export WiFi-Radar models to ONNX and optionally validate against OnnxRuntime.
 
-    Steps:
-        1. Parse CLI arguments.
-        2. Instantiate DualBranchEncoder and PoseEstimator on CPU.
-        3. Load a .pth checkpoint if ``--weights`` is provided; otherwise export
-           with random weights (useful for graph-structure validation only).
-        4. Set both models to eval mode (disables BatchNorm training stats and Dropout).
-        5. Call ``export_encoder()`` and ``export_pose_estimator()``.
-        6. Optionally run ``validate_with_onnxruntime()`` to confirm that ONNX
-           Runtime output matches the PyTorch reference within 1e-4 tolerance.
-
+    ID: WR-SCRIPT-ONNX-MAIN-001
+    Requirement: Parse CLI args, instantiate models, optionally load weights,
+                 export both models to ONNX, and optionally validate with ORT.
+    Purpose: Serve as the single runnable entry point for the ONNX export
+             workflow so all steps execute in the correct order.
+    Rationale: Combining export and validation in one command reduces operator
+               error compared to separate export/validate scripts.
+    Inputs:
+        sys.argv — via parse_args().
+        Filesystem: optional .pth checkpoint.
+    Outputs:
+        Writes encoder.onnx and pose_estimator.onnx to args.output_dir.
+    Preconditions:
+        None — entry point.
+    Postconditions:
+        Two .onnx files exist in args.output_dir.
+    Assumptions:
+        If --weights is not provided, random-initialised models are exported
+        (useful for graph-structure validation only).
     Side Effects:
-        Creates ``args.output_dir`` if needed.
-        Writes two .onnx files to ``args.output_dir``.
-        Logs paths of the generated files on completion.
+        Creates args.output_dir if needed.
+        Writes two .onnx files.
+        Logs file paths on completion.
+    Failure Modes:
+        Missing onnxruntime: validation skipped with a warning.
+        ONNX opset < 17: export_encoder raises RuntimeError.
+    Error Handling:
+        Propagates exceptions from export helpers to caller.
+    Constraints:
+        Both models are exported on CPU regardless of CUDA availability.
+    Verification:
+        Integration test: run script; assert both .onnx files exist.
+    References:
+        export_encoder; export_pose_estimator; validate_with_onnxruntime;
+        parse_args; WR-SCRIPT-ONNX-001.
     """
     os.makedirs(args.output_dir, exist_ok=True)
 

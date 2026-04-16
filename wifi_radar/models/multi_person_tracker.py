@@ -278,6 +278,7 @@ class MultiPersonPoseEstimator(nn.Module):
         References:
             nn.init.kaiming_normal_; nn.init.orthogonal_; WR-MODEL-MPT-MPPE-INIT-001.
         """
+        def _init(m):
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
                 if m.bias is not None:
@@ -288,6 +289,7 @@ class MultiPersonPoseEstimator(nn.Module):
                         nn.init.orthogonal_(p)
                     elif "bias" in name:
                         nn.init.constant_(p, 0)
+        self.apply(_init)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

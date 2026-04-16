@@ -527,6 +527,7 @@ class FallDetector:
         References:
             FallEvent; FallSeverity; WR-ANALYSIS-FALL-001.
         """
+        severity_labels = {
             FallSeverity.POSSIBLE_FALL: "Possible fall",
             FallSeverity.FALL_DETECTED: "Fall detected",
             FallSeverity.ALERT:         "ALERT — no recovery",

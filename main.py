@@ -48,24 +48,35 @@ from wifi_radar.visualization.house_visualizer import HouseVisualizer  # noqa: F
 def parse_args():
     """Parse and validate command-line arguments for the WiFi-Radar application.
 
-    Arguments defined:
-        --simulation          Run with synthetic CSI instead of a real router.
-        --router-ip           IPv4 address of the CSI-capable router (default 192.168.1.1).
-        --router-port         TCP port the router firmware streams CSI on (default 5500).
-        --dashboard-port      HTTP port for the Dash web UI (default 8050).
-        --rtmp-url            RTMP destination for the live H.264 stream.
-        --debug               Enable DEBUG-level logging.
-        --config              Path to a YAML configuration file.
-        --house-visualization Enable the optional pygame top-down room view.
-        --record              Record incoming CSI frames to disk.
-        --output-dir          Directory for recorded CSI data (default ~/wifi_data).
-        --replay              Replay a previously recorded CSI file.
-        --weights             Path to a .pth model checkpoint.
-        --num-people          Number of simulated people in simulation mode (1–4).
-        --export-onnx         Export models to ONNX then exit immediately.
-
-    Returns:
-        ``argparse.Namespace`` with all parsed argument values.
+    ID: WR-MAIN-PARSEARGS-001
+    Requirement: Define and parse all CLI arguments; return an argparse.Namespace
+                 with validated values and defaults.
+    Purpose: Allow operator control of simulation mode, router address, dashboard
+             port, RTMP URL, weights path, and optional features at launch time.
+    Rationale: argparse provides automatic --help generation, type validation,
+               and default values without manual sys.argv parsing.
+    Inputs:
+        sys.argv — CLI arguments from the shell.
+    Outputs:
+        argparse.Namespace — parsed arguments with all fields present.
+    Preconditions:
+        Called before logging is configured; no side effects on the filesystem.
+    Postconditions:
+        All argument fields are populated with CLI values or defaults.
+    Assumptions:
+        Called once at startup before any subsystem is initialised.
+    Side Effects:
+        May call sys.exit(2) on invalid arguments (argparse behaviour).
+    Failure Modes:
+        Invalid argument type: argparse prints error and calls sys.exit(2).
+    Error Handling:
+        argparse handles type/range errors; no additional validation needed here.
+    Constraints:
+        --num-people is clamped to [1,4] by argparse min/max (not enforced here).
+    Verification:
+        Unit test: call with ['--simulation', '--debug']; assert namespace.simulation.
+    References:
+        argparse.ArgumentParser; WR-MAIN-001 module docstring.
     """
     parser = argparse.ArgumentParser(
         description="WiFi-Radar: Human Pose Estimation through WiFi Signals"
@@ -133,16 +144,36 @@ def parse_args():
 def setup_logging(debug: bool = False) -> None:
     """Configure root logger with console and rotating file handlers.
 
-    Log format: ``%(asctime)s - %(name)s - %(levelname)s - %(message)s``
-
-    Args:
-        debug: When True sets the root log level to DEBUG; otherwise INFO.
-               DEBUG mode emits per-frame inference timings and track events
-               which are too verbose for normal operation.
-
+    ID: WR-MAIN-SETUPLOG-001
+    Requirement: Configure the root logging.Logger with a StreamHandler and a
+                 FileHandler ('wifi_radar.log'), at DEBUG or INFO level.
+    Purpose: Ensure all subsystem loggers (which use getLogger(__name__)) inherit
+             a consistent format and dual output without requiring individual setup.
+    Rationale: basicConfig on the root logger is the simplest way to provide
+               global formatting; FileHandler persists logs across sessions.
+    Inputs:
+        debug — bool: if True, set log level to DEBUG; otherwise INFO.
+    Outputs:
+        None — configures the root logger as a side effect.
+    Preconditions:
+        Called before any subsystem creates a logger.
+    Postconditions:
+        Root logger is configured; all subsequent getLogger() calls inherit it.
+    Assumptions:
+        Current working directory is writable for 'wifi_radar.log'.
     Side Effects:
-        Configures the root ``logging`` logger.
-        Creates / appends to ``wifi_radar.log`` in the current working directory.
+        Creates or appends to 'wifi_radar.log' in the CWD.
+        Modifies the global root logging.Logger.
+    Failure Modes:
+        CWD not writable: FileHandler raises PermissionError; StreamHandler still works.
+    Error Handling:
+        No explicit error handling; FileHandler failure propagates to caller.
+    Constraints:
+        Log format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'.
+    Verification:
+        Unit test: call setup_logging(debug=True); assert root logger level == DEBUG.
+    References:
+        logging.basicConfig; logging.StreamHandler; logging.FileHandler.
     """
     level = logging.DEBUG if debug else logging.INFO
 
@@ -154,26 +185,40 @@ def setup_logging(debug: bool = False) -> None:
 
 
 def load_config(config_path=None):
-    """Load application configuration, merging built-in defaults with a YAML file.
+    """Load application configuration, merging built-in defaults with an optional YAML file.
 
-    The returned dict has the following top-level sections:
-        ``router``              — IP, port, NIC interface, CSI format.
-        ``system``              — simulation mode, debug flag, data directory.
-        ``dashboard``           — HTTP port, theme, update interval, history length.
-        ``streaming``           — RTMP URL, frame dimensions, FPS, bitrate.
-        ``house_visualization`` — enable flag, window size, FPS, wall transparency.
-
-    Args:
-        config_path: Optional path to a YAML file.  Keys present in the file
-                     override the corresponding default values.  Extra top-level
-                     sections not in the defaults are added verbatim.
-
-    Returns:
-        Nested ``dict`` with the merged configuration.
-
+    ID: WR-MAIN-LOADCFG-001
+    Requirement: Return a nested config dict with sections: router, system, dashboard,
+                 streaming, house_visualization; override defaults with values from
+                 config_path if provided and readable.
+    Purpose: Provide a single source of truth for all subsystem parameters so
+             operators can tune the system without modifying source code.
+    Rationale: Merging per-section with dict.update() preserves defaults for keys
+               not present in the YAML file, preventing KeyErrors at runtime.
+    Inputs:
+        config_path — Optional[str]: path to a YAML configuration file.
+    Outputs:
+        Dict — nested config with all sections populated.
+    Preconditions:
+        yaml (PyYAML) must be installed.
+    Postconditions:
+        Return value contains all required section keys.
+    Assumptions:
+        config_path YAML uses the same top-level section keys as the defaults.
+    Side Effects:
+        Reads the filesystem if config_path is provided.
+        Logs INFO on success, ERROR on failure.
     Failure Modes:
-        If ``config_path`` is provided but unreadable or contains invalid YAML,
-        the error is logged and the built-in defaults are returned unchanged.
+        config_path unreadable or invalid YAML: exception caught; defaults returned.
+    Error Handling:
+        try/except around yaml.safe_load; error logged; defaults returned intact.
+    Constraints:
+        Extra top-level sections not in defaults are added verbatim.
+    Verification:
+        Unit test: create a YAML file overriding router.ip; assert config['router']['ip']
+        matches the YAML value.
+    References:
+        yaml.safe_load; WR-MAIN-001 module docstring.
     """
     import yaml
 
@@ -236,25 +281,40 @@ def load_config(config_path=None):
 def main():
     """Initialise and run the complete WiFi-Radar pipeline.
 
-    Execution sequence:
-        1. Parse CLI arguments and set up logging.
-        2. Load YAML configuration and apply CLI overrides.
-        3. Optionally delegate to scripts/export_onnx.py and exit.
-        4. Instantiate CSICollector, SignalProcessor, DualBranchEncoder,
-           PoseEstimator, MultiPersonTracker, FallDetector per-person,
-           GaitAnalyzer per-person, Dashboard, RTMPStreamer, and optionally
-           HouseVisualizer.
-        5. Load a .pth checkpoint into the encoder + pose estimator if available.
-        6. Start CSICollector, RTMPStreamer, and HouseVisualizer daemon threads.
-        7. Launch the ``processing_thread`` daemon that runs the main inference loop.
-        8. Block on ``Dashboard.run()`` (Dash HTTP server) until interrupted.
-        9. On KeyboardInterrupt or exception: stop all components and exit cleanly.
-
+    ID: WR-MAIN-MAIN-001
+    Requirement: Parse CLI arguments, load configuration, instantiate all
+                 subsystems, start daemon threads, and block on Dashboard.run().
+    Purpose: Serve as the single runnable entry point for the WiFi-Radar system
+             so all subsystems are started and stopped in a defined order.
+    Rationale: Daemon threads for processing, streaming, and visualisation are
+               started before Dashboard.run() so they are ready to serve the
+               first browser request immediately.
+    Inputs:
+        sys.argv — via parse_args().
+        Filesystem: config YAML, weights .pth.
+    Outputs:
+        Running system until KeyboardInterrupt or process termination.
+    Preconditions:
+        None — entry point.
+    Postconditions:
+        On exit: csi_collector, rtmp_streamer, and house_visualizer are stopped.
+    Assumptions:
+        Weights file is optional; system runs with random initialisation otherwise.
     Side Effects:
-        Reads from the filesystem (config, weights).
-        Spawns multiple daemon threads.
-        Listens on dashboard and RTMP network ports.
-        Writes logs to ``wifi_radar.log``.
+        Spawns daemon threads; opens network sockets; binds HTTP and RTMP ports.
+        Writes wifi_radar.log.
+    Failure Modes:
+        Dashboard port already in use: OSError.
+        ONNX export: delegates to scripts/export_onnx.py via subprocess.
+    Error Handling:
+        KeyboardInterrupt: caught; all components stopped in finally block.
+        General Exception: logged; components stopped in finally block.
+    Constraints:
+        Dashboard.run() is blocking; must be called from the main thread.
+    Verification:
+        Integration test: run with --simulation; assert dashboard responds on port 8050.
+    References:
+        parse_args; setup_logging; load_config; WR-MAIN-001 module docstring.
     """
     # Parse command line arguments
     args = parse_args()
@@ -386,26 +446,44 @@ def main():
         import torch
 
         def processing_thread():
-            """Main inference loop: CSI → signal process → encode → pose → track → alert.
+            """Main inference loop: CSI -> signal process -> encode -> pose -> track -> alert.
 
-            Runs continuously as a daemon thread until the process exits or an
-            unhandled exception is caught.
-
-            Per-frame pipeline:
-                1. Block on ``csi_collector.get_csi_data()`` (≤1 s timeout).
-                2. Run ``signal_processor.process()`` (phase unwrap + normalise + filter).
-                3. Convert numpy arrays to float32 tensors and move to ``device``.
-                4. Run ``encoder.forward()`` → 256-d feature vector.
-                5. Run ``pose_estimator.forward()`` → keypoints + confidence.
-                6. Run ``pose_estimator.detect_people()`` → list of person dicts.
-                7. Run ``mp_tracker.update()`` → list of ``TrackedPerson`` with stable IDs.
-                8. For each tracked person: run ``FallDetector.update()`` and
-                   ``GaitAnalyzer.update()``; per-person instances are created lazily.
-                9. Push results to Dashboard (thread-safe) and RTMPStreamer.
-
+            ID: WR-MAIN-PROCTHREAD-001
+            Requirement: Continuously dequeue CSI frames, run the full inference
+                         pipeline, and publish results to Dashboard, RTMPStreamer,
+                         and HouseVisualizer at ~20 Hz.
+            Purpose: Decouple time-sensitive inference from the Dash HTTP server
+                     thread so the web UI remains responsive under full inference load.
+            Rationale: Daemon thread with inner try/except allows clean termination
+                       on KeyboardInterrupt without needing explicit stop signals.
+            Inputs:
+                Reads from csi_collector.get_csi_data() (blocking, 1 s timeout).
+            Outputs:
+                Pushes results to dashboard, rtmp_streamer, house_visualizer.
+            Preconditions:
+                All subsystems must be initialised before this thread starts.
+            Postconditions:
+                On exit: fall_detectors and gait_analysers reflect final state.
+            Assumptions:
+                csi_collector provides (amplitude, phase) tuples at ~20 Hz.
             Side Effects:
-                Writes to ``dashboard`` and ``rtmp_streamer`` via thread-safe methods.
-                Lazily populates ``fall_detectors`` and ``gait_analysers`` dicts.
+                Calls dashboard.update_data(), dashboard.update_events().
+                Calls rtmp_streamer.update_frame().
+                Calls house_visualizer.update_people() if enabled.
+                Lazily populates fall_detectors and gait_analysers dicts.
+            Failure Modes:
+                csi_collector returns None (timeout): iteration skipped.
+                Unhandled exception: logged; thread exits.
+            Error Handling:
+                KeyboardInterrupt caught; generic Exception caught and logged.
+            Constraints:
+                Not real-time; time.sleep(0.01) used to yield CPU between frames.
+            Verification:
+                Integration test: run with --simulation; assert dashboard updates.
+            References:
+                CSICollector.get_csi_data; SignalProcessor.process;
+                DualBranchEncoder; PoseEstimator; MultiPersonTracker.update;
+                FallDetector.update; GaitAnalyzer.update; WR-MAIN-MAIN-001.
             """
             hidden_state = None
             frame_id = 0

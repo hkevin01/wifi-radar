@@ -85,14 +85,40 @@ _WALK_AMP = np.array([
 
 
 def generate_pose(cx: float, cy: float, walking_phase: float = 0.0) -> np.ndarray:
-    """Generate a body pose centred at (cx, cy) in normalised space.
+    """Generate a COCO-17 body pose centred at (cx, cy) with optional walking motion.
 
-    Args:
-        cx, cy:        Centre position, both in [−1, 1].
-        walking_phase: Phase angle in [0, 2π]; 0 = standing, else walking.
-
-    Returns:
-        (17, 3) float32 keypoint array.
+    ID: WR-SCRIPT-TRAIN-GPOSE-001
+    Requirement: Return a (17,3) float32 keypoint array by translating the
+                 standing body template to (cx, cy) and applying sinusoidal
+                 limb swing when walking_phase != 0.
+    Purpose: Provide ground-truth pose labels for the simulation training dataset
+             without requiring real motion-capture data.
+    Rationale: Left/right limb antiphase (offset by pi) matches human gait
+               biomechanics; np.clip ensures coordinates stay within [-1,1].
+    Inputs:
+        cx            — float [-1,1]: person X centre position.
+        cy            — float [-1,1]: person Y centre position.
+        walking_phase — float [0, 2*pi]: 0 = standing, nonzero = walking cycle.
+    Outputs:
+        (17,3) float32 keypoint array, all values clipped to [-1,1].
+    Preconditions:
+        _STANDING_POSE and _WALK_AMP must be defined module-level.
+    Postconditions:
+        All coordinates in [-1,1]; shape == (17,3).
+    Assumptions:
+        COCO-17 left limb indices: 5,7,9,11,13,15; right: 6,8,10,12,14,16.
+    Side Effects:
+        None — pure function; allocates a new array via .copy().
+    Failure Modes:
+        cx, cy outside [-1,1]: output may be partially clipped.
+    Error Handling:
+        np.clip enforces [-1,1] after pose generation.
+    Constraints:
+        None.
+    Verification:
+        Unit test: cx=0, cy=0, phase=0; assert output[0] == _STANDING_POSE[0].
+    References:
+        _STANDING_POSE; _WALK_AMP; COCO-17 keypoint format.
     """
     pose = _STANDING_POSE.copy()
     # Translate to person's position
@@ -120,11 +146,40 @@ def generate_csi(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Generate a single synthetic CSI frame for a person at (x_pos, y_pos).
 
-    Args:
-        x_pos, y_pos: Person's normalised position in [0, 1].
-
-    Returns:
-        amplitude, phase — each (num_tx, num_rx, num_sub) float32.
+    ID: WR-SCRIPT-TRAIN-GCSI-001
+    Requirement: Return (amplitude, phase) arrays shaped (num_tx, num_rx, num_sub)
+                 simulating multipath CSI influenced by person position.
+    Purpose: Provide synthetic CSI training inputs correlated with the person
+             position so the encoder can learn position-sensitive features.
+    Rationale: Rayleigh amplitude and uniform phase model a realistic OFDM
+               channel; an exponential spatial effect term adds position-dependent
+               structure the encoder must learn to decode.
+    Inputs:
+        x_pos  — float [0,1]: normalised person X position.
+        y_pos  — float [0,1]: normalised person Y position.
+        num_tx — int: number of TX antennas.
+        num_rx — int: number of RX antennas.
+        num_sub — int: number of OFDM subcarriers.
+    Outputs:
+        Tuple (amplitude, phase) each (num_tx, num_rx, num_sub) float32.
+    Preconditions:
+        None.
+    Postconditions:
+        amplitude > 0 (Rayleigh distribution); phase in [-pi*1.8, pi*1.8] approx.
+    Assumptions:
+        Position effect uses Euclidean distance in TX/RX index space.
+    Side Effects:
+        None — pure function; uses numpy RNG (not seeded here; caller seeds).
+    Failure Modes:
+        None expected for valid numeric inputs.
+    Error Handling:
+        None required.
+    Constraints:
+        Not suitable for physics-accurate channel simulation; training-only.
+    Verification:
+        Unit test: assert output shapes == (num_tx, num_rx, num_sub).
+    References:
+        Rayleigh fading model; WR-SCRIPT-TRAIN-001.
     """
     amplitude = np.random.rayleigh(scale=1.0, size=(num_tx, num_rx, num_sub)).astype(np.float32)
     phase     = np.random.uniform(-np.pi, np.pi, size=(num_tx, num_rx, num_sub)).astype(np.float32)
@@ -146,16 +201,76 @@ def generate_csi(
 # ─────────────────────────────────────────────────────────────────────────── #
 
 class SimulatedPoseDataset(Dataset):
-    """Pre-generated in-memory dataset of (amplitude, phase) → keypoint pairs.
+    """Pre-generated in-memory dataset of (amplitude, phase) -> keypoint pairs.
 
-    Args:
-        n_samples:    Number of training examples to generate.
-        walking_frac: Fraction of samples in walking pose (rest are standing).
-        seed:         Random seed for reproducibility.
+    ID: WR-SCRIPT-TRAIN-DATASET-001
+    Requirement: Generate n_samples synthetic (CSI, pose) pairs at construction
+                 time, store them in memory, and serve them via __getitem__.
+    Purpose: Provide a reproducible, hardware-free training dataset so the
+             baseline model can be trained on any CPU/GPU without a real router.
+    Rationale: Pre-generation at construction time avoids per-epoch regeneration
+               overhead; in-memory storage eliminates disk I/O bottlenecks.
+    Inputs:
+        n_samples    — int > 0: number of training examples to generate.
+        walking_frac — float [0,1]: fraction of samples in walking pose.
+        seed         — int: RNG seed for reproducibility.
+    Outputs:
+        __getitem__ returns (amp_tensor, phase_tensor, kp_tensor, conf_tensor).
+    Preconditions:
+        generate_csi and generate_pose must be defined.
+    Postconditions:
+        len(self) == n_samples; all tensors are float32.
+    Assumptions:
+        Enough RAM to hold n_samples * (3*3*64 + 3*3*64 + 17*3 + 17) float32 values.
+    Side Effects:
+        Allocates ~n_samples * ~10 KB of RAM at construction time.
+    Failure Modes:
+        OOM for very large n_samples on constrained systems.
+    Error Handling:
+        None; relies on numpy/Python memory management.
+    Constraints:
+        seed fixes both the position sampling and walking-phase selection.
+    Verification:
+        Unit test: construct with n_samples=10; assert len(ds)==10.
+    References:
+        generate_csi; generate_pose; WR-SCRIPT-TRAIN-001.
     """
 
     def __init__(self, n_samples: int = 8000, walking_frac: float = 0.6, seed: int = 42) -> None:
-        rng = np.random.default_rng(seed)
+        """Initialise and pre-generate the simulated training dataset.
+
+        ID: WR-SCRIPT-TRAIN-DS-INIT-001
+        Requirement: Generate n_samples (CSI, pose) pairs and store them in
+                     self._amp, self._phase, self._kp, self._conf.
+        Purpose: Pre-generate all data at construction time so DataLoader workers
+                 perform zero computation at training time.
+        Rationale: np.random.default_rng(seed) is used for reproducible position
+                   and phase sampling independent of global RNG state.
+        Inputs:
+            n_samples    — int: number of samples to generate.
+            walking_frac — float [0,1]: fraction of walking (vs standing) samples.
+            seed         — int: RNG seed.
+        Outputs:
+            None — populates self._amp, self._phase, self._kp, self._conf.
+        Preconditions:
+            generate_csi and generate_pose must be defined.
+        Postconditions:
+            len(self._amp) == n_samples.
+        Assumptions:
+            Sufficient RAM available for n_samples entries.
+        Side Effects:
+            Allocates four Python lists of numpy arrays.
+        Failure Modes:
+            OOM for very large n_samples.
+        Error Handling:
+            None; relies on numpy/Python memory management.
+        Constraints:
+            Keypoint noise std = 0.02; positions sampled from [0.1, 0.9].
+        Verification:
+            Unit test: construct with n_samples=5; assert len == 5.
+        References:
+            generate_csi; generate_pose; WR-SCRIPT-TRAIN-DATASET-001.
+        """
         n_walking = int(n_samples * walking_frac)
 
         self._amp: list  = []
@@ -182,9 +297,58 @@ class SimulatedPoseDataset(Dataset):
             self._conf.append(conf)
 
     def __len__(self) -> int:
-        return len(self._amp)
+        """Return the number of samples in the dataset.
+
+        ID: WR-SCRIPT-TRAIN-DS-LEN-001
+        Requirement: Return len(self._amp) as the dataset size for DataLoader.
+        Purpose: Required by torch.utils.data.Dataset; allows DataLoader to
+                 compute the number of batches per epoch.
+        Rationale: Delegates to len(list) for O(1) retrieval.
+        Inputs: None.
+        Outputs: int — number of samples.
+        Preconditions: __init__ has been called.
+        Postconditions: return value == n_samples from __init__.
+        Assumptions: None.
+        Side Effects: None.
+        Failure Modes: None.
+        Error Handling: None.
+        Constraints: None.
+        Verification: assert len(SimulatedPoseDataset(n_samples=5)) == 5.
+        References: torch.utils.data.Dataset.__len__.
+        """
 
     def __getitem__(self, idx: int):
+        """Return the (amplitude, phase, keypoints, confidence) tuple at index idx.
+
+        ID: WR-SCRIPT-TRAIN-DS-GETITEM-001
+        Requirement: Return a 4-tuple of float32 torch.Tensors for the sample
+                     at position idx.
+        Purpose: Provide the DataLoader with individual training samples.
+        Rationale: torch.from_numpy avoids a data copy when the underlying array
+                   is C-contiguous float32.
+        Inputs:
+            idx — int [0, len-1]: sample index.
+        Outputs:
+            Tuple (amp, phase, kp, conf) — each a float32 Tensor.
+        Preconditions:
+            0 <= idx < len(self).
+        Postconditions:
+            All returned tensors are float32.
+        Assumptions:
+            DataLoader owns the batching; this method returns a single sample.
+        Side Effects:
+            None.
+        Failure Modes:
+            IndexError if idx out of range.
+        Error Handling:
+            None; relies on Python list bounds checking.
+        Constraints:
+            None.
+        Verification:
+            Unit test: ds[0][0].dtype == torch.float32.
+        References:
+            torch.utils.data.Dataset.__getitem__.
+        """
         return (
             torch.from_numpy(self._amp[idx]),
             torch.from_numpy(self._phase[idx]),
@@ -198,33 +362,43 @@ class SimulatedPoseDataset(Dataset):
 # ─────────────────────────────────────────────────────────────────────────── #
 
 def train(args: argparse.Namespace) -> None:
-    """Run the full training pipeline: dataset generation → training → validation → checkpoint.
+    """Run the full training pipeline: dataset -> train -> validate -> checkpoint.
 
-    Phases:
-        1. Dataset generation — creates an in-memory ``SimulatedPoseDataset``;
-           80 % training split, 10 % validation split.
-        2. Model initialisation — constructs ``DualBranchEncoder`` and
-           ``PoseEstimator``; optionally resumes from a checkpoint.
-        3. Optimiser + scheduler setup — Adam with weight decay 1e-5 and a
-           cosine-annealing LR schedule decaying to 1 % of the initial LR.
-        4. Epoch loop:
-             a. Training pass — forward, compute loss, backward, gradient clip,
-                step optimiser.
-             b. Validation pass — forward only (torch.no_grad()), accumulate loss.
-             c. Checkpoint — save if ``val_loss`` improved.
-        5. Completion summary — logs the best validation loss and output path.
-
-    Loss function:
-        ``total = MSE(kp_pred, kp_gt) + 0.1 × BCE(conf_pred, conf_gt)``
-        The 0.1 weight keeps the confidence loss term an order of magnitude
-        smaller than the keypoint regression loss during early training.
-
-    Args:
-        args: Parsed argument namespace from ``parse_args()``.
-
+    ID: WR-SCRIPT-TRAIN-TRAIN-001
+    Requirement: Instantiate dataset and models, run an epoch loop with Adam +
+                 cosine-LR, save the best checkpoint by validation loss.
+    Purpose: Produce a simulation-trained baseline checkpoint so the system can
+             run inference immediately without real router hardware.
+    Rationale: Adam with cosine annealing provides fast convergence and smooth
+               LR decay; gradient clipping (max_norm=1.0) prevents LSTM explosion.
+    Inputs:
+        args — argparse.Namespace with epochs, n_samples, batch_size, lr, seed,
+               output_dir, resume.
+    Outputs:
+        Writes best checkpoint to args.output_dir/simulation_baseline.pth.
+    Preconditions:
+        DualBranchEncoder, PoseEstimator, save_checkpoint, load_checkpoint must
+        be importable.
+    Postconditions:
+        Checkpoint file exists with the lowest observed validation loss.
+    Assumptions:
+        CUDA is used if available; CPU fallback is supported.
     Side Effects:
-        Creates ``args.output_dir`` if it does not exist.
-        Writes / overwrites ``weights/simulation_baseline.pth`` when val_loss improves.
+        Creates args.output_dir if not present.
+        Writes/overwrites simulation_baseline.pth on every val_loss improvement.
+        Logs progress to stdout via logging.info.
+    Failure Modes:
+        args.resume path not found: skips resume silently.
+        Disk full: save_checkpoint raises IOError.
+    Error Handling:
+        Resume FileNotFoundError implicitly handled by os.path.exists guard.
+    Constraints:
+        Loss = MSE(keypoints) + 0.1 * BCE(confidence).
+        Gradient clipped at max_norm=1.0.
+    Verification:
+        Smoke test: run 5 epochs, 100 samples; assert checkpoint file created.
+    References:
+        SimulatedPoseDataset; DualBranchEncoder; PoseEstimator; WR-SCRIPT-TRAIN-001.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Device: %s", device)
@@ -355,17 +529,37 @@ def train(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for the simulation-baseline training script.
 
-    Args defined:
-        --epochs     Number of full passes through the training dataset.
-        --n-samples  Total number of synthetic CSI/pose pairs to generate.
-        --batch-size Mini-batch size for the DataLoader.
-        --lr         Initial learning rate for the Adam optimiser.
-        --seed       RNG seed for dataset generation and train/val split.
-        --output-dir Directory where checkpoints are written.
-        --resume     Path to an existing checkpoint to continue training from.
-
-    Returns:
-        Parsed ``argparse.Namespace``.
+    ID: WR-SCRIPT-TRAIN-PARSEARGS-001
+    Requirement: Define and parse all CLI arguments for training configuration;
+                 return a Namespace with validated values and defaults.
+    Purpose: Allow CI/CD pipelines and operators to tune training hyperparameters
+             without modifying source code.
+    Rationale: argparse provides automatic --help, type checking, and defaults;
+               all parameters have sensible defaults for a quick CPU baseline run.
+    Inputs:
+        sys.argv — CLI arguments.
+    Outputs:
+        argparse.Namespace with: epochs, n_samples, batch_size, lr, seed,
+        output_dir, resume.
+    Preconditions:
+        Called before train().
+    Postconditions:
+        All argument fields populated.
+    Assumptions:
+        Default epochs=80 and n_samples=8000 produce a useful baseline in <10 min
+        on a modern CPU.
+    Side Effects:
+        May call sys.exit(2) on invalid arguments (argparse behaviour).
+    Failure Modes:
+        Invalid argument type: argparse raises SystemExit.
+    Error Handling:
+        Handled by argparse.
+    Constraints:
+        None.
+    Verification:
+        Unit test: call with []; assert args.epochs == 80.
+    References:
+        argparse.ArgumentParser; WR-SCRIPT-TRAIN-001.
     """
     p.add_argument("--epochs",     type=int,   default=80,      help="Training epochs")
     p.add_argument("--n-samples",  type=int,   default=8000,    help="Synthetic dataset size")
