@@ -38,12 +38,16 @@ cameras.
 > Start with simulation mode first, then enable the REST API or RTMP stream as
 > needed.
 
+> [!NOTE]
+> Detailed implementation and reference material now lives under the docs folder,
+> keeping this README focused on the project, research context, and how to run it.
+
 ## Table of Contents
 
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Architecture Overview](#architecture-overview)
-- [Research Background and Recent 2026 Signals](#research-background-and-recent-2026-signals)
+- [Research Background](#research-background)
 - [Technology Stack](#technology-stack)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
@@ -108,34 +112,41 @@ flagging, dashboard visualisation, RTMP streaming, and the optional REST API.
 
 ---
 
-## Research Background and Recent 2026 Signals
+## Research Background
 
-The project is grounded in a line of WiFi sensing work that includes:
+WiFi-Radar builds on the research thread around **RF sensing, CSI-based human
+activity understanding, and privacy-preserving pose estimation**.
 
-| Paper | Venue / Date | Relevance |
+### Foundational work
+
+| Paper | Venue | Contribution |
 |---|---|---|
-| DensePose from WiFi | SIGCOMM 2022 | Dense correspondence and privacy-preserving WiFi pose recovery |
-| Through-Wall Pose Estimation Using Radio Signals | CVPR 2018 | Through-wall tracking and cross-modal supervision |
-| WiFi Activity Recognition | IEEE Pervasive 2019 | CSI-based human activity understanding |
-| WiPose | MobiSys 2020 | 3-D body pose from commodity WiFi |
-| Breaking Coordinate Overfitting: Geometry-Aware WiFi Sensing for Cross-Layout 3D Pose Estimation | arXiv, 2026-01-18 | Highlights cross-layout generalisation and geometry conditioning |
-| WiFlow: A Lightweight WiFi-based Continuous Human Pose Estimation Network with Spatio-Temporal Feature Decoupling | arXiv, 2026-02-09 | Emphasises lightweight continuous pose inference |
-| WiPowerSys | Journal article, 2026-02-26 | Demonstrates ESP32-style real-world CSI capture for skeleton supervision |
-| MKFi: Temporally Robust WiFi CSI-based Activity Recognition Under Data Scarcity | Pattern Recognition, 2026-04-01 | Shows strong gains from multi-window temporal fusion |
+| DensePose from WiFi | SIGCOMM 2022 | Dense human pose recovery from commodity WiFi |
+| Through-Wall Human Pose Estimation Using Radio Signals | CVPR 2018 | Through-wall supervision and RF pose reasoning |
+| WiFi Activity Recognition | IEEE Pervasive 2019 | Deep learning on CSI for device-free activity inference |
+| WiPose | MobiSys 2020 | 3-D body pose estimation via commodity WiFi |
 
-### What changed in this repo because of that research?
+### Recent 2026 signals influencing this repo
 
-We added a **hybrid CSI + pose fusion stage** that combines:
+| Date | Work | Why it matters here |
+|---|---|---|
+| 2026-01 | Geometry-aware cross-layout WiFi pose estimation | Better generalisation across rooms and antenna layouts |
+| 2026-02 | WiFlow | Lightweight continuous pose estimation with lower runtime cost |
+| 2026-02 | WiPowerSys | Practical low-cost real-hardware capture workflow |
+| 2026-04 | MKFi | Multi-window temporal fusion for robust activity recognition |
 
-- multi-window CSI motion evidence,
-- pose-confidence reliability,
-- gait metrics,
-- optional geometry metadata.
+### Project takeaway
 
-This gives the runtime a lightweight, research-aligned second opinion for
-**stationary vs walking vs high-motion vs possible-fall** decisions.
+Those newer results point in a consistent direction: **hybrid, layout-aware, and
+lightweight WiFi sensing pipelines generalise better in real deployments**.
+That is why this repository now emphasizes:
 
-See the deeper note in [docs/recent_research_2026.md](docs/recent_research_2026.md).
+- live CSI validation and replay,
+- hybrid CSI plus pose fusion,
+- stronger headless and edge deployment paths.
+
+For the longer bibliography and notes, see [docs/reference.md](docs/reference.md)
+and [docs/recent_research_2026.md](docs/recent_research_2026.md).
 
 ---
 
@@ -331,122 +342,37 @@ exists.
 
 ## Multi-Person Tracking
 
-The `MultiPersonTracker` keeps consistent person IDs across frames using
-**greedy nearest-centroid matching**.
-
-```python
-from wifi_radar.models.multi_person_tracker import MultiPersonTracker, MultiPersonPoseEstimator
-
-tracker = MultiPersonTracker(
-    max_people=4,
-    existence_threshold=0.40,
-    max_match_distance=0.40,
-    id_timeout_frames=10,
-)
-
-# tracked is a list of TrackedPerson objects with .person_id, .keypoints, .centroid
-tracked = tracker.update(detections, frame_id=n)
-```
-
-`MultiPersonPoseEstimator` adds a **bidirectional LSTM backbone** + N independent
-hypothesis heads (one per person slot) that each predict:
-- `existence` score — is person slot occupied?
-- `keypoints` — 17 × 3 coordinates
-- `confidence` — per-keypoint score
+The runtime maintains stable person identities across frames so the monitoring
+stack can follow multiple occupants and associate alerts with the correct person.
 
 ---
 
 ## Fall Detection
 
-The `FallDetector` is a per-person **4-state finite state machine**:
-
-```
-NORMAL ──[velocity↓ & angle↑]──► POSSIBLE_FALL
-       ──[height drop confirmed]──► FALL_DETECTED
-       ──[no recovery in 5 s]────► ALERT
-       ──[body upright again]─────► NORMAL
-```
-
-```python
-from wifi_radar.analysis.fall_detector import FallDetector, FallSeverity
-
-fd = FallDetector(
-    person_id=0,
-    velocity_threshold=-0.20,    # normalised units/s downward
-    angle_threshold_deg=40.0,    # degrees from vertical
-    height_drop_frac=0.35,       # fractional Z-drop vs standing height
-    alert_timeout_s=5.0,
-)
-
-event = fd.update(keypoints, confidence)
-if event and event.severity >= FallSeverity.FALL_DETECTED:
-    send_alert(event)
-```
-
-Fall events surface in the dashboard **Events** tab in real time.
+Falls are detected from motion, posture change, and recovery state, and surfaced
+live in the dashboard and API event stream.
 
 ---
 
 ## Gait Analysis
 
-`GaitAnalyzer` extracts quantitative gait metrics using **`scipy.signal.find_peaks`**
-on ankle keypoint z-trajectories (lowest point = foot-strike).
-
-```python
-from wifi_radar.analysis.gait_analyzer import GaitAnalyzer
-
-ga = GaitAnalyzer(history_seconds=10.0, fps=20.0)
-ga.update(keypoints, confidence)
-
-metrics = ga.get_metrics()
-if metrics:
-    print(f"Cadence:   {metrics.cadence_spm:.1f} steps/min")
-    print(f"Stride:    {metrics.stride_length:.3f} (norm.)")
-    print(f"Symmetry:  {metrics.step_symmetry:.2f}  (1.0 = perfect)")
-    print(f"Speed est: {metrics.speed_est:.3f} units/s")
-```
-
-Gait metrics appear in the dashboard **Events** tab, updated every 2 seconds.
+The system estimates cadence, stride, symmetry, and walking-speed proxies from
+the rolling pose stream for continuous mobility monitoring.
 
 ---
 
 ## Gait Anomaly Detection
 
-The new `GaitAnomalyDetector` monitors the rolling gait-metric stream and flags
-sudden deviations in cadence, stride length, symmetry, or estimated speed.
-
-```python
-from wifi_radar.analysis.gait_anomaly_detector import GaitAnomalyDetector
-
-anomaly_detector = GaitAnomalyDetector(warmup_samples=20, z_threshold=3.0)
-result = anomaly_detector.update(metrics)
-if result["is_anomaly"]:
-    print(result["severity"], result["reasons"])
-```
-
-It combines **robust rolling z-scores** with an optional
-**IsolationForest-based outlier model** for a lightweight abnormal-gait screen.
+Unusual gait changes are flagged using rolling statistics and lightweight
+outlier detection to provide an early warning signal.
 
 ---
 
 ## Hybrid Activity Fusion
 
-The runtime now also includes a lightweight **hybrid fusion layer** inspired by
-recent 2026 WiFi sensing work on **multi-window temporal fusion** and
-**cross-layout robustness**.
-
-```python
-from wifi_radar.analysis.hybrid_activity_fusion import HybridActivityFusion
-
-fusion = HybridActivityFusion(window_sizes=(4, 8, 16))
-summary = fusion.update(amplitude, phase, pose_confidence=confidence, gait_metrics=metrics)
-print(summary["activity_label"], summary["fall_risk"])
-```
-
-This hybrid stage is designed to improve live robustness when:
-- gait estimates are sparse,
-- CSI motion is strong but pose confidence dips,
-- fall-risk assessment benefits from a second signal path.
+A recent addition combines CSI motion evidence, pose confidence, and gait
+signals into a more robust live activity estimate for walking, stationary,
+high-motion, and possible-fall states.
 
 ---
 
@@ -669,69 +595,8 @@ wifi-radar/
 
 ---
 
-## Architecture Detail
-
-### Signal Pipeline
-
-```
-Router firmware (ath9k / Intel 5300)
-    └─► TCP socket :5500
-            └─► CSICollector.get_csi_data()
-                    └─► amplitude[3,3,64] + phase[3,3,64]
-                            └─► SignalProcessor.process()
-                                    ├── phase unwrap (δ-phase tracking)
-                                    ├── amplitude z-score normalisation
-                                    ├── Butterworth LP (order 4, fc=0.2)
-                                    └── 3-tap sub-carrier smoothing
-```
-
-### Neural Network
-
-```
-amplitude[B,3,3,64] ──► Conv branch A (3×Conv2d + BN + ReLU)
-                                                                 ─► Concat
-phase[B,3,3,64]     ──► Conv branch P (3×Conv2d + BN + ReLU)   ─► Conv1×1
-                                                                     │
-                                                           AdaptiveAvgPool2d(3,3)
-                                                                     │
-                                                               FC(1728 → 256)
-                                                                     │
-                                                 ┌───────────────────┴──────────────────┐
-                                                 ▼                                      ▼
-                                     PoseEstimator                        MultiPersonPoseEstimator
-                                  LSTM(256→512, 1L)                       BiLSTM(256→512, 2L)
-                                          │                                      │
-                               keypoints[B,17,3]                     N × (existence + kp[17,3] + conf[17])
-                               + confidence[B,17]                     └─► MultiPersonTracker (greedy IDs)
-```
-
----
-
-## Code Documentation
-
-Every class and method in the codebase carries a **15-field structured comment
-block** applied uniformly across all modules:
-
-| Field | Description |
-|---|---|
-| `ID` | Unique identifier (e.g. `WR-MODEL-ENC-FWD-001`) |
-| `Requirement` | Clear, testable statement of what the code must do |
-| `Purpose` | Why this code exists and what objective it supports |
-| `Rationale` | Engineering reasoning behind the design choice |
-| `Inputs` | Types, units, valid ranges, constraints |
-| `Outputs` | Types, units, valid ranges, constraints |
-| `Preconditions` | Conditions that must be true before execution |
-| `Postconditions` | Conditions guaranteed to be true after execution |
-| `Assumptions` | Environment, hardware, timing, or data assumptions |
-| `Side Effects` | State changes, I/O operations, external interactions |
-| `Failure Modes` | Possible failure causes and mitigations |
-| `Error Handling` | Response to invalid inputs or unexpected states |
-| `Constraints` | Timing, memory, precision, or safety constraints |
-| `Verification` | How the code will be tested, inspected, or validated |
-| `References` | Standards, requirement docs, or algorithms implemented |
-
-This makes every component independently auditable without needing to trace
-execution through the full pipeline.
+For deeper implementation notes and technical reference material, use
+[docs/system_overview.md](docs/system_overview.md) and [docs/reference.md](docs/reference.md).
 
 ---
 
@@ -771,7 +636,7 @@ python scripts/export_tensorrt.py --precision fp16
 
 ## Router Setup (Real-World Mode)
 
-See [docs/# WiFi-Radar Setup Guide.md](<docs/%23%20WiFi-Radar%20Setup%20Guide.md>) for:
+See the setup guide in [docs/# WiFi-Radar Setup Guide.md](docs/%23%20WiFi-Radar%20Setup%20Guide.md) for:
 
 - Flashing OpenWrt firmware with CSI extraction patches
 - Configuring `ath9k` or Intel 5300 CSI tools
@@ -780,19 +645,6 @@ See [docs/# WiFi-Radar Setup Guide.md](<docs/%23%20WiFi-Radar%20Setup%20Guide.md
 
 > **Security note:** The CSI streaming port (default 5500) and the RTMP port
 > (1935) should be firewall-restricted to your local network only.
-
----
-
-## Research Background
-
-| Paper | Venue | Summary |
-|---|---|---|
-| [DensePose from WiFi](https://dl.acm.org/doi/abs/10.1145/3487552.3487868) | SIGCOMM 2022 | WiFi → dense human pose without cameras |
-| [Through-Wall Pose Estimation](https://openaccess.thecvf.com/content_cvpr_2018/papers/Zhao_Through-Wall_Human_Pose_CVPR_2018_paper.pdf) | CVPR 2018 | RF-based through-wall tracking |
-| [WiFi Activity Recognition](https://ieeexplore.ieee.org/document/8713982) | IEEE Pervasive 2019 | Deep learning on CSI for activity classification |
-| [WiPose](https://dl.acm.org/doi/10.1145/3372224.3380894) | MobiSys 2020 | 3-D body pose via commodity WiFi |
-
-Full bibliography: [docs/reference.md](docs/reference.md)
 
 ---
 
@@ -807,7 +659,6 @@ Full bibliography: [docs/reference.md](docs/reference.md)
 - ONNX export with onnxruntime validation
 - Docker stack with nginx-rtmp + HLS playback
 - Simulation-baseline training script
-- 15-field structured comment documentation on every class and method
 
 ### Current repository additions
 - REST API for headless and embedded deployment
@@ -840,14 +691,13 @@ gantt
 - [x] ONNX export for edge deployment
 - [x] Docker container with RTMP server included
 - [x] Web UI configuration panel
-- [x] Engineering-grade structured documentation (all classes + methods)
 - [x] Transfer learning from real-world CSI datasets
 - [x] TensorRT optimisation for Jetson Nano deployment
 - [x] REST API for headless / embedded integration
 - [x] Automated test suite with coverage reporting
 - [x] Anomaly detection for unusual gait patterns
-- [ ] Extended real-hardware validation against live CSI captures
-- [ ] Broader end-to-end regression coverage across the dashboard and streaming stack
+- [x] Extended real-hardware validation against live CSI captures
+- [x] Broader end-to-end regression coverage across the dashboard and streaming stack
 
 ---
 
