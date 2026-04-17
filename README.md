@@ -119,21 +119,21 @@ activity understanding, and privacy-preserving pose estimation**.
 
 ### Foundational work
 
-| Paper | Venue | Contribution |
-|---|---|---|
-| DensePose from WiFi | SIGCOMM 2022 | Dense human pose recovery from commodity WiFi |
-| Through-Wall Human Pose Estimation Using Radio Signals | CVPR 2018 | Through-wall supervision and RF pose reasoning |
-| WiFi Activity Recognition | IEEE Pervasive 2019 | Deep learning on CSI for device-free activity inference |
-| WiPose | MobiSys 2020 | 3-D body pose estimation via commodity WiFi |
+| Paper | Venue | Contribution | Link |
+|---|---|---|---|
+| DensePose from WiFi | SIGCOMM 2022 | Dense human pose recovery from commodity WiFi | [Paper](https://arxiv.org/abs/2301.00250) |
+| Through-Wall Human Pose Estimation Using Radio Signals | CVPR 2018 | Through-wall supervision and RF pose reasoning | [Paper](https://openaccess.thecvf.com/content_cvpr_2018/html/Zhao_Through-Wall_Human_Pose_CVPR_2018_paper.html) |
+| WiFi Activity Recognition | IEEE Pervasive 2019 | Deep learning on CSI for device-free activity inference | [Paper](https://ieeexplore.ieee.org/document/8713982) |
+| WiPose | MobiSys 2020 | 3-D body pose estimation via commodity WiFi | [Paper](https://dl.acm.org/doi/10.1145/3386901.3388940) |
 
 ### Recent 2026 signals influencing this repo
 
-| Date | Work | Why it matters here |
-|---|---|---|
-| 2026-01 | Geometry-aware cross-layout WiFi pose estimation | Better generalisation across rooms and antenna layouts |
-| 2026-02 | WiFlow | Lightweight continuous pose estimation with lower runtime cost |
-| 2026-02 | WiPowerSys | Practical low-cost real-hardware capture workflow |
-| 2026-04 | MKFi | Multi-window temporal fusion for robust activity recognition |
+| Date | Work | Why it matters here | Link |
+|---|---|---|---|
+| 2026-01 | Geometry-aware cross-layout WiFi pose estimation | Better generalisation across rooms and antenna layouts | [Paper](https://arxiv.org/abs/2601.12252) |
+| 2026-02 | WiFlow | Lightweight continuous pose estimation with lower runtime cost | [Paper](https://arxiv.org/abs/2602.08661) |
+| 2026-02 | WiPowerSys | Practical low-cost real-hardware capture workflow | [Paper](https://link.springer.com/article/10.1007/s13369-026-11172-7) |
+| 2026-04 | MKFi | Multi-window temporal fusion for robust activity recognition | [Paper](https://www.sciencedirect.com/science/article/pii/S0031320325011756) |
 
 ### Project takeaway
 
