@@ -621,12 +621,18 @@ class Dashboard:
                 for ev in reversed(events[-20:]):
                     ts_str = time.strftime("%H:%M:%S", time.localtime(ev["timestamp"]))
                     color  = severity_colors.get(ev["severity"], "secondary")
+                    body_angle = ev.get("body_angle_deg")
+                    angle_text = (
+                        f"Body angle: {float(body_angle):.1f}°"
+                        if body_angle is not None
+                        else "Body angle: n/a"
+                    )
                     fall_ui.append(
                         dbc.Alert(
                             [
                                 html.Strong(f"[{ts_str}] Person {ev['person_id']}  —  {ev['message']}"),
                                 html.Br(),
-                                html.Small(f"Body angle: {ev['body_angle_deg']:.1f}°"),
+                                html.Small(angle_text),
                             ],
                             color=color,
                             className="mb-1 py-2",
@@ -637,17 +643,31 @@ class Dashboard:
             if metrics is None:
                 gait_ui = [html.P("Collecting data …", className="text-muted")]
             else:
+                metric_rows = [
+                    html.Tr([html.Td("Cadence"),         html.Td(f"{metrics['cadence_spm']:.1f} steps/min")]),
+                    html.Tr([html.Td("Stride Length"),   html.Td(f"{metrics['stride_length']:.3f} (norm.)")]),
+                    html.Tr([html.Td("Step Symmetry"),   html.Td(f"{metrics['step_symmetry']:.2f}")]),
+                    html.Tr([html.Td("Est. Speed"),      html.Td(f"{metrics['speed_est']:.3f} units/s")]),
+                    html.Tr([html.Td("Steps in window"), html.Td(str(metrics["num_steps"]))]),
+                    html.Tr([html.Td("Window"),          html.Td(f"{metrics['window_s']:.1f} s")]),
+                ]
+                if metrics.get("activity_label") is not None:
+                    metric_rows.append(
+                        html.Tr([html.Td("Hybrid Activity"), html.Td(str(metrics["activity_label"]))])
+                    )
+                if metrics.get("motion_score") is not None:
+                    metric_rows.append(
+                        html.Tr([html.Td("Motion Score"), html.Td(f"{metrics['motion_score']:.3f}")])
+                    )
+                if metrics.get("fall_risk") is not None:
+                    metric_rows.append(
+                        html.Tr([html.Td("Hybrid Fall Risk"), html.Td(f"{metrics['fall_risk']:.2f}")])
+                    )
+
                 gait_ui = [
                     dbc.Table([
                         html.Thead(html.Tr([html.Th("Metric"), html.Th("Value")])),
-                        html.Tbody([
-                            html.Tr([html.Td("Cadence"),         html.Td(f"{metrics['cadence_spm']:.1f} steps/min")]),
-                            html.Tr([html.Td("Stride Length"),   html.Td(f"{metrics['stride_length']:.3f} (norm.)")]),
-                            html.Tr([html.Td("Step Symmetry"),   html.Td(f"{metrics['step_symmetry']:.2f}")]),
-                            html.Tr([html.Td("Est. Speed"),      html.Td(f"{metrics['speed_est']:.3f} units/s")]),
-                            html.Tr([html.Td("Steps in window"), html.Td(str(metrics["num_steps"]))]),
-                            html.Tr([html.Td("Window"),          html.Td(f"{metrics['window_s']:.1f} s")]),
-                        ]),
+                        html.Tbody(metric_rows),
                     ], bordered=True, hover=True, size="sm", dark=True),
                 ]
 

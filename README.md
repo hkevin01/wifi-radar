@@ -43,6 +43,7 @@ cameras.
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Architecture Overview](#architecture-overview)
+- [Research Background and Recent 2026 Signals](#research-background-and-recent-2026-signals)
 - [Technology Stack](#technology-stack)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
@@ -51,6 +52,7 @@ cameras.
 - [Fall Detection](#fall-detection)
 - [Gait Analysis](#gait-analysis)
 - [Gait Anomaly Detection](#gait-anomaly-detection)
+- [Hybrid Activity Fusion](#hybrid-activity-fusion)
 - [REST API and Headless Mode](#rest-api-and-headless-mode)
 - [Transfer Learning on Real CSI](#transfer-learning-on-real-csi)
 - [ONNX Export](#onnx-export)
@@ -74,6 +76,7 @@ cameras.
 | 🚨 | Fall detection | Velocity + body-angle state machine for alerts | High | ✅ Stable |
 | 🚶 | Gait analytics | Cadence, stride, symmetry, and speed metrics | High | ✅ Stable |
 | 🩺 | Gait anomaly detection | Rolling abnormality detection using gait metrics | Medium | 🧪 Experimental |
+| 🔀 | Hybrid CSI + pose fusion | Multi-window motion fusion with pose and gait cues for more robust live activity scoring | Medium | 🧪 Experimental |
 | 🌐 | REST API | Headless integration endpoints for status, config, events, and metrics | High | 🧪 Experimental |
 | ⚡ | ONNX and TensorRT export | Edge deployment path for Jetson-style hardware | High | 🧪 Experimental |
 | 🧪 | Transfer learning workflow | Fine-tune on real-world CSI datasets in NPZ format | High | 🧪 Experimental |
@@ -102,6 +105,37 @@ The runtime pipeline is organised around a single orchestration entry point in
 **main.py**. CSI is collected, denoised, encoded, decoded into pose keypoints,
 and then routed into tracking, fall analysis, gait analytics, optional anomaly
 flagging, dashboard visualisation, RTMP streaming, and the optional REST API.
+
+---
+
+## Research Background and Recent 2026 Signals
+
+The project is grounded in a line of WiFi sensing work that includes:
+
+| Paper | Venue / Date | Relevance |
+|---|---|---|
+| DensePose from WiFi | SIGCOMM 2022 | Dense correspondence and privacy-preserving WiFi pose recovery |
+| Through-Wall Pose Estimation Using Radio Signals | CVPR 2018 | Through-wall tracking and cross-modal supervision |
+| WiFi Activity Recognition | IEEE Pervasive 2019 | CSI-based human activity understanding |
+| WiPose | MobiSys 2020 | 3-D body pose from commodity WiFi |
+| Breaking Coordinate Overfitting: Geometry-Aware WiFi Sensing for Cross-Layout 3D Pose Estimation | arXiv, 2026-01-18 | Highlights cross-layout generalisation and geometry conditioning |
+| WiFlow: A Lightweight WiFi-based Continuous Human Pose Estimation Network with Spatio-Temporal Feature Decoupling | arXiv, 2026-02-09 | Emphasises lightweight continuous pose inference |
+| WiPowerSys | Journal article, 2026-02-26 | Demonstrates ESP32-style real-world CSI capture for skeleton supervision |
+| MKFi: Temporally Robust WiFi CSI-based Activity Recognition Under Data Scarcity | Pattern Recognition, 2026-04-01 | Shows strong gains from multi-window temporal fusion |
+
+### What changed in this repo because of that research?
+
+We added a **hybrid CSI + pose fusion stage** that combines:
+
+- multi-window CSI motion evidence,
+- pose-confidence reliability,
+- gait metrics,
+- optional geometry metadata.
+
+This gives the runtime a lightweight, research-aligned second opinion for
+**stationary vs walking vs high-motion vs possible-fall** decisions.
+
+See the deeper note in [docs/recent_research_2026.md](docs/recent_research_2026.md).
 
 ---
 
@@ -392,6 +426,27 @@ if result["is_anomaly"]:
 
 It combines **robust rolling z-scores** with an optional
 **IsolationForest-based outlier model** for a lightweight abnormal-gait screen.
+
+---
+
+## Hybrid Activity Fusion
+
+The runtime now also includes a lightweight **hybrid fusion layer** inspired by
+recent 2026 WiFi sensing work on **multi-window temporal fusion** and
+**cross-layout robustness**.
+
+```python
+from wifi_radar.analysis.hybrid_activity_fusion import HybridActivityFusion
+
+fusion = HybridActivityFusion(window_sizes=(4, 8, 16))
+summary = fusion.update(amplitude, phase, pose_confidence=confidence, gait_metrics=metrics)
+print(summary["activity_label"], summary["fall_risk"])
+```
+
+This hybrid stage is designed to improve live robustness when:
+- gait estimates are sparse,
+- CSI motion is strong but pose confidence dips,
+- fall-risk assessment benefits from a second signal path.
 
 ---
 

@@ -374,6 +374,7 @@ def main():
         from wifi_radar.analysis.fall_detector import FallDetector, FallSeverity
         from wifi_radar.analysis.gait_analyzer import GaitAnalyzer
         from wifi_radar.analysis.gait_anomaly_detector import GaitAnomalyDetector
+        from wifi_radar.analysis.hybrid_activity_fusion import HybridActivityFusion
         from wifi_radar.data.csi_collector import CSICollector
         from wifi_radar.models.encoder import DualBranchEncoder
         from wifi_radar.models.multi_person_tracker import MultiPersonTracker
@@ -434,6 +435,7 @@ def main():
     fall_detectors: dict = {}
     gait_analysers: dict = {}
     gait_anomaly_detectors: dict = {}
+    hybrid_activity_fusers: dict = {}
     api_state = AppState(config=config) if AppState is not None else None
 
     # Initialize visualization
@@ -584,6 +586,7 @@ def main():
 
                     # Fall detection + gait analysis per tracked person
                     new_fall_events = []
+                    hybrid_summaries = {}
                     ts_now = time.time()
                     for person in tracked:
                         pid = person.person_id
@@ -597,7 +600,9 @@ def main():
                             )
                             gait_analysers[pid] = GaitAnalyzer()
                             gait_anomaly_detectors[pid] = GaitAnomalyDetector()
+                            hybrid_activity_fusers[pid] = HybridActivityFusion()
 
+                        ev = None
                         if fall_enabled:
                             ev = fall_detectors[pid].update(
                                 person.keypoints, person.confidence, timestamp=ts_now
@@ -626,10 +631,33 @@ def main():
                                     "message": "Gait anomaly detected: " + "; ".join(anomaly.get("reasons", [])[:2]),
                                 })
 
+                        hybrid_summary = hybrid_activity_fusers[pid].update(
+                            amplitude=processed_amplitude,
+                            phase=processed_phase,
+                            pose_confidence=person.confidence,
+                            gait_metrics=gm_person,
+                            fall_severity=int(ev.severity) if ev is not None else 0,
+                        )
+                        hybrid_summaries[pid] = hybrid_summary
+                        if (
+                            hybrid_summary.get("activity_label") == "possible_fall"
+                            and ev is None
+                            and hybrid_summary.get("fall_risk", 0.0) >= 0.85
+                            and frame_id % 20 == 0
+                        ):
+                            new_fall_events.append({
+                                "person_id": pid,
+                                "timestamp": ts_now,
+                                "severity": int(FallSeverity.POSSIBLE_FALL),
+                                "body_angle_deg": None,
+                                "message": "Hybrid CSI plus pose fusion flagged a possible fall pattern.",
+                            })
+
                     # Collect gait metrics from first active person
                     gait_metrics_dict = None
                     if tracked:
-                        gm = gait_analysers[tracked[0].person_id].get_metrics()
+                        lead_pid = tracked[0].person_id
+                        gm = gait_analysers[lead_pid].get_metrics()
                         if gm is not None:
                             gait_metrics_dict = {
                                 "cadence_spm":    gm.cadence_spm,
@@ -639,6 +667,8 @@ def main():
                                 "num_steps":      gm.num_steps,
                                 "window_s":       gm.window_s,
                             }
+                            if lead_pid in hybrid_summaries:
+                                gait_metrics_dict.update(hybrid_summaries[lead_pid])
 
                     # Dashboard updates
                     first_person_dict = None
@@ -679,6 +709,9 @@ def main():
                             "csi_summary": {
                                 "amplitude_mean": float(np.mean(amplitude)),
                                 "phase_mean": float(np.mean(phase)),
+                                "activity_label": gait_metrics_dict.get("activity_label") if gait_metrics_dict else None,
+                                "motion_score": gait_metrics_dict.get("motion_score") if gait_metrics_dict else None,
+                                "fall_risk": gait_metrics_dict.get("fall_risk") if gait_metrics_dict else None,
                             },
                             "events": new_fall_events,
                         })
