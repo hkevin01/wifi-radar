@@ -2,21 +2,25 @@
 
 # 📡 WiFi-Radar
 
-### Human Pose Estimation Through WiFi Signals
+<!-- brass-brief:intro -->
+## Executive Summary For Leadership
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python)](https://python.org)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch)](https://pytorch.org)
-[![ONNX](https://img.shields.io/badge/ONNX-1.15%2B-005CED?logo=onnx)](https://onnx.ai)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](docker/docker-compose.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](pyproject.toml)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+Wifi Radar is designed to solve a specific business and process problem, not just showcase technical capability. WiFi-Radar is a Python research system for WiFi-based human pose estimation, tracking, fall detection, gait analytics, and headless monitoring. It consumes Channel State Information from commodity WiFi hardware or the built-in simulation pipeline, transforms it into learned embeddings, and emits 17-keypoint 3-D pose outputs in real time. The result is a more repeatable operating model where leadership can compare progress, quality, and impact with less ambiguity.
 
-*Detect, track and analyse human poses through walls — no cameras required*
+## Current State Without This Project
 
-</div>
+Teams lose time to repetitive setup and environment drift. This increases operational friction, slows decision cycles, and makes results harder to compare across teams.
 
----
+## Why This Project Is Needed Now
+
+This project standardizes execution patterns and reduces operational variability. As a prototype, it allows leadership to validate value early before committing to a larger rollout.
+
+## Expected Process Improvements
+
+- Faster delivery, fewer setup errors, and improved maintainability.
+- Better executive visibility into status, bottlenecks, and next priorities.
+- Clearer linkage between technical outputs and business decisions.
+- Reduced rework through standardized execution patterns.
 
 ## Overview
 
@@ -72,6 +76,9 @@ cameras.
 
 ## Key Features
 
+<!-- brass-brief:table-pre -->
+> **Leadership context for Wifi Radar:** This table highlights capability, gaps, and expected impact to support faster prioritization decisions.
+
 | Icon | Feature | Description | Impact | Status |
 |---|---|---|---|---|
 | 📶 | CSI collection | Real or simulated CSI frames with 3×3 MIMO support | High | ✅ Stable |
@@ -85,6 +92,11 @@ cameras.
 | ⚡ | ONNX and TensorRT export | Edge deployment path for Jetson-style hardware | High | 🧪 Experimental |
 | 🧪 | Transfer learning workflow | Fine-tune on real-world CSI datasets in NPZ format | High | 🧪 Experimental |
 | 🐳 | Docker deployment | App + RTMP stack via Compose | Medium | ✅ Stable |
+
+<!-- brass-brief:table-post -->
+> **How this helps the core problem:** Use this view to choose what to pilot first, what to scale next, and what to monitor for measurable process improvement.
+
+ Use the table as a planning baseline for staffing, risk reduction, and process improvement. The practical goal is to move from reactive work to repeatable, measurable execution with clearer accountability.
 
 ---
 
@@ -119,6 +131,9 @@ activity understanding, and privacy-preserving pose estimation**.
 
 ### Foundational work
 
+<!-- brass-brief:table-pre -->
+> **Leadership context for Wifi Radar:** This table highlights capability, gaps, and expected impact to support faster prioritization decisions.
+
 | Paper | Venue | Contribution | Link |
 |---|---|---|---|
 | DensePose from WiFi | SIGCOMM 2022 | Dense human pose recovery from commodity WiFi | [Paper](https://arxiv.org/abs/2301.00250) |
@@ -126,7 +141,15 @@ activity understanding, and privacy-preserving pose estimation**.
 | WiFi Activity Recognition | IEEE Pervasive 2019 | Deep learning on CSI for device-free activity inference | [Paper](https://ieeexplore.ieee.org/document/8713982) |
 | WiPose | MobiSys 2020 | 3-D body pose estimation via commodity WiFi | [Paper](https://dl.acm.org/doi/10.1145/3386901.3388940) |
 
+<!-- brass-brief:table-post -->
+> **How this helps the core problem:** Use this view to choose what to pilot first, what to scale next, and what to monitor for measurable process improvement.
+
+ Use the table as a planning baseline for staffing, risk reduction, and process improvement. The practical goal is to move from reactive work to repeatable, measurable execution with clearer accountability.
+
 ### Recent 2026 signals influencing this repo
+
+<!-- brass-brief:table-pre -->
+> **Leadership context for Wifi Radar:** This table highlights capability, gaps, and expected impact to support faster prioritization decisions.
 
 | Date | Work | Why it matters here | Link |
 |---|---|---|---|
@@ -134,6 +157,11 @@ activity understanding, and privacy-preserving pose estimation**.
 | 2026-02 | WiFlow | Lightweight continuous pose estimation with lower runtime cost | [Paper](https://arxiv.org/abs/2602.08661) |
 | 2026-02 | WiPowerSys | Practical low-cost real-hardware capture workflow | [Paper](https://link.springer.com/article/10.1007/s13369-026-11172-7) |
 | 2026-04 | MKFi | Multi-window temporal fusion for robust activity recognition | [Paper](https://www.sciencedirect.com/science/article/pii/S0031320325011756) |
+
+<!-- brass-brief:table-post -->
+> **How this helps the core problem:** Use this view to choose what to pilot first, what to scale next, and what to monitor for measurable process improvement.
+
+ Use the table as a planning baseline for staffing, risk reduction, and process improvement. The practical goal is to move from reactive work to repeatable, measurable execution with clearer accountability.
 
 ### Project takeaway
 
@@ -152,6 +180,9 @@ and [docs/recent_research_2026.md](docs/recent_research_2026.md).
 
 ## Technology Stack
 
+<!-- brass-brief:table-pre -->
+> **Leadership context for Wifi Radar:** This table highlights capability, gaps, and expected impact to support faster prioritization decisions.
+
 | Technology | Purpose | Why Chosen | Alternatives |
 |---|---|---|---|
 | Python | Core runtime and tooling | Fast iteration for research systems | C++, Rust |
@@ -162,6 +193,11 @@ and [docs/recent_research_2026.md](docs/recent_research_2026.md).
 | ONNX | Portable model export | Runtime-neutral deployment path | TorchScript |
 | TensorRT | Jetson acceleration | Best NVIDIA edge inference performance | Plain ONNX Runtime |
 | Docker + nginx-rtmp | Deployment and streaming | Reproducible stack and HLS playback | Bare-metal services |
+
+<!-- brass-brief:table-post -->
+> **How this helps the core problem:** Use this view to choose what to pilot first, what to scale next, and what to monitor for measurable process improvement.
+
+ Use the table as a planning baseline for staffing, risk reduction, and process improvement. The practical goal is to move from reactive work to repeatable, measurable execution with clearer accountability.
 
 ---
 
@@ -218,11 +254,19 @@ python main.py --simulation
 docker compose -f docker/docker-compose.yml up --build
 ```
 
+<!-- brass-brief:table-pre -->
+> **Leadership context for Wifi Radar:** This table highlights capability, gaps, and expected impact to support faster prioritization decisions.
+
 | Port | Service |
 |---|---|
 | **8050** | Dash dashboard |
 | **1935** | RTMP ingest |
 | **8080** | HLS playback + nginx stats |
+
+<!-- brass-brief:table-post -->
+> **How this helps the core problem:** Use this view to choose what to pilot first, what to scale next, and what to monitor for measurable process improvement.
+
+ Use the table as a planning baseline for staffing, risk reduction, and process improvement. The practical goal is to move from reactive work to repeatable, measurable execution with clearer accountability.
 
 HLS stream: `http://localhost:8080/hls/wifi_radar.m3u8`
 
@@ -237,6 +281,9 @@ python main.py --router-ip 192.168.1.1 --rtmp-url rtmp://localhost/live/wifi_rad
 ```
 
 ### Flag reference
+
+<!-- brass-brief:table-pre -->
+> **Leadership context for Wifi Radar:** This table highlights capability, gaps, and expected impact to support faster prioritization decisions.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -258,6 +305,11 @@ python main.py --router-ip 192.168.1.1 --rtmp-url rtmp://localhost/live/wifi_rad
 | `--replay FILE` | none | Replay a recorded session |
 | `--config FILE` | user config path | YAML config file |
 | `--debug` | off | Verbose logging |
+
+<!-- brass-brief:table-post -->
+> **How this helps the core problem:** Use this view to choose what to pilot first, what to scale next, and what to monitor for measurable process improvement.
+
+ Use the table as a planning baseline for staffing, risk reduction, and process improvement. The practical goal is to move from reactive work to repeatable, measurable execution with clearer accountability.
 
 ### Common examples
 
@@ -499,10 +551,18 @@ docker compose -f docker/docker-compose.yml up --build
 
 **Services:**
 
+<!-- brass-brief:table-pre -->
+> **Leadership context for Wifi Radar:** This table highlights capability, gaps, and expected impact to support faster prioritization decisions.
+
 | Container | Image | Role |
 |---|---|---|
 | `wifi-radar-app` | built from `docker/Dockerfile` | Python 3.11 app, port 8050 |
 | `wifi-radar-rtmp` | `alfg/nginx-rtmp` | RTMP ingest 1935, HLS 8080 |
+
+<!-- brass-brief:table-post -->
+> **How this helps the core problem:** Use this view to choose what to pilot first, what to scale next, and what to monitor for measurable process improvement.
+
+ Use the table as a planning baseline for staffing, risk reduction, and process improvement. The practical goal is to move from reactive work to repeatable, measurable execution with clearer accountability.
 
 **Watch the stream in a browser:**
 ```
