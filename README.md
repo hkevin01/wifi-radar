@@ -72,19 +72,19 @@ cameras.
 
 ## Key Features
 
-| Icon | Feature | Description | Impact | Status |
+| <sub>Icon</sub> | <sub>Feature</sub> | <sub>Description</sub> | <sub>Impact</sub> | <sub>Status</sub> |
 |---|---|---|---|---|
-| 📶 | CSI collection | Real or simulated CSI frames with 3×3 MIMO support | High | ✅ Stable |
-| 🧠 | Dual-branch pose pipeline | Amplitude + phase encoder feeding temporal pose estimation | High | ✅ Stable |
-| 👥 | Multi-person tracking | Stable IDs via greedy centroid matching | High | ✅ Stable |
-| 🚨 | Fall detection | Velocity + body-angle state machine for alerts | High | ✅ Stable |
-| 🚶 | Gait analytics | Cadence, stride, symmetry, and speed metrics | High | ✅ Stable |
-| 🩺 | Gait anomaly detection | Rolling abnormality detection using gait metrics | Medium | 🧪 Experimental |
-| 🔀 | Hybrid CSI + pose fusion | Multi-window motion fusion with pose and gait cues for more robust live activity scoring | Medium | 🧪 Experimental |
-| 🌐 | REST API | Headless integration endpoints for status, config, events, and metrics | High | 🧪 Experimental |
-| ⚡ | ONNX and TensorRT export | Edge deployment path for Jetson-style hardware | High | 🧪 Experimental |
-| 🧪 | Transfer learning workflow | Fine-tune on real-world CSI datasets in NPZ format | High | 🧪 Experimental |
-| 🐳 | Docker deployment | App + RTMP stack via Compose | Medium | ✅ Stable |
+| <sub>📶</sub> | <sub>CSI collection</sub> | <sub>Real or simulated CSI frames with 3×3 MIMO support</sub> | <sub>High</sub> | <sub>✅ Stable</sub> |
+| <sub>🧠</sub> | <sub>Dual-branch pose pipeline</sub> | <sub>Amplitude + phase encoder feeding temporal pose estimation</sub> | <sub>High</sub> | <sub>✅ Stable</sub> |
+| <sub>👥</sub> | <sub>Multi-person tracking</sub> | <sub>Stable IDs via greedy centroid matching</sub> | <sub>High</sub> | <sub>✅ Stable</sub> |
+| <sub>🚨</sub> | <sub>Fall detection</sub> | <sub>Velocity + body-angle state machine for alerts</sub> | <sub>High</sub> | <sub>✅ Stable</sub> |
+| <sub>🚶</sub> | <sub>Gait analytics</sub> | <sub>Cadence, stride, symmetry, and speed metrics</sub> | <sub>High</sub> | <sub>✅ Stable</sub> |
+| <sub>🩺</sub> | <sub>Gait anomaly detection</sub> | <sub>Rolling abnormality detection using gait metrics</sub> | <sub>Medium</sub> | <sub>🧪 Experimental</sub> |
+| <sub>🔀</sub> | <sub>Hybrid CSI + pose fusion</sub> | <sub>Multi-window motion fusion with pose and gait cues for more robust live activity scoring</sub> | <sub>Medium</sub> | <sub>🧪 Experimental</sub> |
+| <sub>🌐</sub> | <sub>REST API</sub> | <sub>Headless integration endpoints for status, config, events, and metrics</sub> | <sub>High</sub> | <sub>🧪 Experimental</sub> |
+| <sub>⚡</sub> | <sub>ONNX and TensorRT export</sub> | <sub>Edge deployment path for Jetson-style hardware</sub> | <sub>High</sub> | <sub>🧪 Experimental</sub> |
+| <sub>🧪</sub> | <sub>Transfer learning workflow</sub> | <sub>Fine-tune on real-world CSI datasets in NPZ format</sub> | <sub>High</sub> | <sub>🧪 Experimental</sub> |
+| <sub>🐳</sub> | <sub>Docker deployment</sub> | <sub>App + RTMP stack via Compose</sub> | <sub>Medium</sub> | <sub>✅ Stable</sub> |
 
 ---
 
@@ -119,21 +119,21 @@ activity understanding, and privacy-preserving pose estimation**.
 
 ### Foundational work
 
-| Paper | Venue | Contribution | Link |
+| <sub>Paper</sub> | <sub>Venue</sub> | <sub>Contribution</sub> | <sub>Link</sub> |
 |---|---|---|---|
-| DensePose from WiFi | SIGCOMM 2022 | Dense human pose recovery from commodity WiFi | [Paper](https://arxiv.org/abs/2301.00250) |
-| Through-Wall Human Pose Estimation Using Radio Signals | CVPR 2018 | Through-wall supervision and RF pose reasoning | [Paper](https://openaccess.thecvf.com/content_cvpr_2018/html/Zhao_Through-Wall_Human_Pose_CVPR_2018_paper.html) |
-| WiFi Activity Recognition | IEEE Pervasive 2019 | Deep learning on CSI for device-free activity inference | [Paper](https://ieeexplore.ieee.org/document/8713982) |
-| WiPose | MobiSys 2020 | 3-D body pose estimation via commodity WiFi | [Paper](https://dl.acm.org/doi/10.1145/3386901.3388940) |
+| <sub>DensePose from WiFi</sub> | <sub>SIGCOMM 2022</sub> | <sub>Dense human pose recovery from commodity WiFi</sub> | <sub>[Paper](https://arxiv.org/abs/2301.00250)</sub> |
+| <sub>Through-Wall Human Pose Estimation Using Radio Signals</sub> | <sub>CVPR 2018</sub> | <sub>Through-wall supervision and RF pose reasoning</sub> | <sub>[Paper](https://openaccess.thecvf.com/content_cvpr_2018/html/Zhao_Through-Wall_Human_Pose_CVPR_2018_paper.html)</sub> |
+| <sub>WiFi Activity Recognition</sub> | <sub>IEEE Pervasive 2019</sub> | <sub>Deep learning on CSI for device-free activity inference</sub> | <sub>[Paper](https://ieeexplore.ieee.org/document/8713982)</sub> |
+| <sub>WiPose</sub> | <sub>MobiSys 2020</sub> | <sub>3-D body pose estimation via commodity WiFi</sub> | <sub>[Paper](https://dl.acm.org/doi/10.1145/3386901.3388940)</sub> |
 
 ### Recent 2026 signals influencing this repo
 
-| Date | Work | Why it matters here | Link |
+| <sub>Date</sub> | <sub>Work</sub> | <sub>Why it matters here</sub> | <sub>Link</sub> |
 |---|---|---|---|
-| 2026-01 | Geometry-aware cross-layout WiFi pose estimation | Better generalisation across rooms and antenna layouts | [Paper](https://arxiv.org/abs/2601.12252) |
-| 2026-02 | WiFlow | Lightweight continuous pose estimation with lower runtime cost | [Paper](https://arxiv.org/abs/2602.08661) |
-| 2026-02 | WiPowerSys | Practical low-cost real-hardware capture workflow | [Paper](https://link.springer.com/article/10.1007/s13369-026-11172-7) |
-| 2026-04 | MKFi | Multi-window temporal fusion for robust activity recognition | [Paper](https://www.sciencedirect.com/science/article/pii/S0031320325011756) |
+| <sub>2026-01</sub> | <sub>Geometry-aware cross-layout WiFi pose estimation</sub> | <sub>Better generalisation across rooms and antenna layouts</sub> | <sub>[Paper](https://arxiv.org/abs/2601.12252)</sub> |
+| <sub>2026-02</sub> | <sub>WiFlow</sub> | <sub>Lightweight continuous pose estimation with lower runtime cost</sub> | <sub>[Paper](https://arxiv.org/abs/2602.08661)</sub> |
+| <sub>2026-02</sub> | <sub>WiPowerSys</sub> | <sub>Practical low-cost real-hardware capture workflow</sub> | <sub>[Paper](https://link.springer.com/article/10.1007/s13369-026-11172-7)</sub> |
+| <sub>2026-04</sub> | <sub>MKFi</sub> | <sub>Multi-window temporal fusion for robust activity recognition</sub> | <sub>[Paper](https://www.sciencedirect.com/science/article/pii/S0031320325011756)</sub> |
 
 ### Project takeaway
 
@@ -152,16 +152,16 @@ and [docs/recent_research_2026.md](docs/recent_research_2026.md).
 
 ## Technology Stack
 
-| Technology | Purpose | Why Chosen | Alternatives |
+| <sub>Technology</sub> | <sub>Purpose</sub> | <sub>Why Chosen</sub> | <sub>Alternatives</sub> |
 |---|---|---|---|
-| Python | Core runtime and tooling | Fast iteration for research systems | C++, Rust |
-| PyTorch | Model training and inference | Flexible for CNN/LSTM experimentation | TensorFlow |
-| SciPy + NumPy | Signal processing and numerical ops | Mature scientific stack | Custom DSP code |
-| Dash + Plotly | Live monitoring UI | Fast interactive dashboarding | Streamlit, React |
-| FastAPI + Uvicorn | Headless REST API | Typed endpoints and automatic docs | Flask |
-| ONNX | Portable model export | Runtime-neutral deployment path | TorchScript |
-| TensorRT | Jetson acceleration | Best NVIDIA edge inference performance | Plain ONNX Runtime |
-| Docker + nginx-rtmp | Deployment and streaming | Reproducible stack and HLS playback | Bare-metal services |
+| <sub>Python</sub> | <sub>Core runtime and tooling</sub> | <sub>Fast iteration for research systems</sub> | <sub>C++, Rust</sub> |
+| <sub>PyTorch</sub> | <sub>Model training and inference</sub> | <sub>Flexible for CNN/LSTM experimentation</sub> | <sub>TensorFlow</sub> |
+| <sub>SciPy + NumPy</sub> | <sub>Signal processing and numerical ops</sub> | <sub>Mature scientific stack</sub> | <sub>Custom DSP code</sub> |
+| <sub>Dash + Plotly</sub> | <sub>Live monitoring UI</sub> | <sub>Fast interactive dashboarding</sub> | <sub>Streamlit, React</sub> |
+| <sub>FastAPI + Uvicorn</sub> | <sub>Headless REST API</sub> | <sub>Typed endpoints and automatic docs</sub> | <sub>Flask</sub> |
+| <sub>ONNX</sub> | <sub>Portable model export</sub> | <sub>Runtime-neutral deployment path</sub> | <sub>TorchScript</sub> |
+| <sub>TensorRT</sub> | <sub>Jetson acceleration</sub> | <sub>Best NVIDIA edge inference performance</sub> | <sub>Plain ONNX Runtime</sub> |
+| <sub>Docker + nginx-rtmp</sub> | <sub>Deployment and streaming</sub> | <sub>Reproducible stack and HLS playback</sub> | <sub>Bare-metal services</sub> |
 
 ---
 
@@ -218,11 +218,11 @@ python main.py --simulation
 docker compose -f docker/docker-compose.yml up --build
 ```
 
-| Port | Service |
+| <sub>Port</sub> | <sub>Service</sub> |
 |---|---|
-| **8050** | Dash dashboard |
-| **1935** | RTMP ingest |
-| **8080** | HLS playback + nginx stats |
+| <sub>**8050**</sub> | <sub>Dash dashboard</sub> |
+| <sub>**1935**</sub> | <sub>RTMP ingest</sub> |
+| <sub>**8080**</sub> | <sub>HLS playback + nginx stats</sub> |
 
 HLS stream: `http://localhost:8080/hls/wifi_radar.m3u8`
 
@@ -238,26 +238,26 @@ python main.py --router-ip 192.168.1.1 --rtmp-url rtmp://localhost/live/wifi_rad
 
 ### Flag reference
 
-| Flag | Default | Description |
+| <sub>Flag</sub> | <sub>Default</sub> | <sub>Description</sub> |
 |---|---|---|
-| `--simulation` | off | Use the built-in CSI simulator |
-| `--num-people N` | `1` | Simulated people count |
-| `--router-ip IP` | `192.168.1.1` | Real router address |
-| `--router-port P` | `5500` | CSI TCP port |
-| `--weights PATH` | auto | Checkpoint to load |
-| `--export-onnx` | off | Export ONNX models and exit |
-| `--dashboard-port P` | `8050` | Dash UI port |
-| `--rtmp-url URL` | local RTMP URL | RTMP push target |
-| `--house-visualization` | off | Enable pygame room view |
-| `--api` | off | Enable the FastAPI REST service |
-| `--api-host HOST` | `0.0.0.0` | API bind host |
-| `--api-port P` | `8081` | API bind port |
-| `--headless` | off | Run without blocking on the dashboard |
-| `--record` | off | Save CSI frames to disk |
-| `--output-dir DIR` | `~/wifi_data` | Recording output directory |
-| `--replay FILE` | none | Replay a recorded session |
-| `--config FILE` | user config path | YAML config file |
-| `--debug` | off | Verbose logging |
+| <sub>`--simulation`</sub> | <sub>off</sub> | <sub>Use the built-in CSI simulator</sub> |
+| <sub>`--num-people N`</sub> | <sub>`1`</sub> | <sub>Simulated people count</sub> |
+| <sub>`--router-ip IP`</sub> | <sub>`192.168.1.1`</sub> | <sub>Real router address</sub> |
+| <sub>`--router-port P`</sub> | <sub>`5500`</sub> | <sub>CSI TCP port</sub> |
+| <sub>`--weights PATH`</sub> | <sub>auto</sub> | <sub>Checkpoint to load</sub> |
+| <sub>`--export-onnx`</sub> | <sub>off</sub> | <sub>Export ONNX models and exit</sub> |
+| <sub>`--dashboard-port P`</sub> | <sub>`8050`</sub> | <sub>Dash UI port</sub> |
+| <sub>`--rtmp-url URL`</sub> | <sub>local RTMP URL</sub> | <sub>RTMP push target</sub> |
+| <sub>`--house-visualization`</sub> | <sub>off</sub> | <sub>Enable pygame room view</sub> |
+| <sub>`--api`</sub> | <sub>off</sub> | <sub>Enable the FastAPI REST service</sub> |
+| <sub>`--api-host HOST`</sub> | <sub>`0.0.0.0`</sub> | <sub>API bind host</sub> |
+| <sub>`--api-port P`</sub> | <sub>`8081`</sub> | <sub>API bind port</sub> |
+| <sub>`--headless`</sub> | <sub>off</sub> | <sub>Run without blocking on the dashboard</sub> |
+| <sub>`--record`</sub> | <sub>off</sub> | <sub>Save CSI frames to disk</sub> |
+| <sub>`--output-dir DIR`</sub> | <sub>`~/wifi_data`</sub> | <sub>Recording output directory</sub> |
+| <sub>`--replay FILE`</sub> | <sub>none</sub> | <sub>Replay a recorded session</sub> |
+| <sub>`--config FILE`</sub> | <sub>user config path</sub> | <sub>YAML config file</sub> |
+| <sub>`--debug`</sub> | <sub>off</sub> | <sub>Verbose logging</sub> |
 
 ### Common examples
 
@@ -499,10 +499,10 @@ docker compose -f docker/docker-compose.yml up --build
 
 **Services:**
 
-| Container | Image | Role |
+| <sub>Container</sub> | <sub>Image</sub> | <sub>Role</sub> |
 |---|---|---|
-| `wifi-radar-app` | built from `docker/Dockerfile` | Python 3.11 app, port 8050 |
-| `wifi-radar-rtmp` | `alfg/nginx-rtmp` | RTMP ingest 1935, HLS 8080 |
+| <sub>`wifi-radar-app`</sub> | <sub>built from `docker/Dockerfile`</sub> | <sub>Python 3.11 app, port 8050</sub> |
+| <sub>`wifi-radar-rtmp`</sub> | <sub>`alfg/nginx-rtmp`</sub> | <sub>RTMP ingest 1935, HLS 8080</sub> |
 
 **Watch the stream in a browser:**
 ```
