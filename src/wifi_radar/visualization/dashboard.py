@@ -20,6 +20,15 @@ import dash_bootstrap_components as dbc
 import numpy as np
 import plotly.graph_objects as go
 import yaml
+def _deep_merge_dict(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge nested dict values from patch into base."""
+    merged = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
 
@@ -768,7 +777,7 @@ class Dashboard:
                 with open(self._config_path, "w") as fh:
                     yaml.safe_dump(new_config, fh, default_flow_style=False)
 
-                self._config.update(new_config)
+                self._config = _deep_merge_dict(self._config, new_config)
                 if self._on_config_change:
                     self._on_config_change(new_config)
 

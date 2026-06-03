@@ -183,6 +183,17 @@ def setup_logging(debug: bool = False) -> None:
     )
 
 
+def _deep_merge_dict(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge nested dict values from patch into base."""
+    merged = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(config_path=None):
     """Load application configuration, merging built-in defaults with an optional YAML file.
 
@@ -447,6 +458,23 @@ def main():
         config_path=os.path.expanduser("~/.wifi_radar/config.yaml"),
     )
 
+    def _on_dashboard_config_change(new_config: Dict[str, Any]) -> None:
+        """Apply dashboard-saved configuration to live in-process state."""
+        nonlocal config
+        config = _deep_merge_dict(config, new_config)
+        if api_state is not None:
+            api_state.update_config(new_config)
+
+        # Apply selected runtime knobs immediately without restart.
+        try:
+            csi_collector.router_ip = config.get("router", {}).get("ip", csi_collector.router_ip)
+            csi_collector.port = int(config.get("router", {}).get("port", csi_collector.port))
+            csi_collector.sim_num_people = int(config.get("system", {}).get("max_people", csi_collector.sim_num_people))
+        except Exception:
+            logger.exception("Failed applying live collector config update")
+
+    dashboard.set_config_change_callback(_on_dashboard_config_change)
+
     # Initialize RTMP streaming
     logger.info("Initializing RTMP streaming")
     rtmp_streamer = RTMPStreamer(
@@ -552,11 +580,11 @@ def main():
             hidden_state = None
             frame_id = 0
 
-            fall_cfg = config.get("fall_detection", {})
-            fall_enabled = fall_cfg.get("enabled", True)
-
             try:
                 while True:
+                    fall_cfg = config.get("fall_detection", {})
+                    fall_enabled = bool(fall_cfg.get("enabled", True))
+
                     csi_data = csi_collector.get_csi_data(block=True, timeout=1.0)
                     if csi_data is None:
                         continue
@@ -604,6 +632,13 @@ def main():
 
                         ev = None
                         if fall_enabled:
+                            # Keep existing detectors in sync with live config changes.
+                            fall_detectors[pid].velocity_threshold = float(
+                                fall_cfg.get("velocity_threshold", fall_detectors[pid].velocity_threshold)
+                            )
+                            fall_detectors[pid].angle_threshold_deg = float(
+                                fall_cfg.get("angle_threshold_deg", fall_detectors[pid].angle_threshold_deg)
+                            )
                             ev = fall_detectors[pid].update(
                                 person.keypoints, person.confidence, timestamp=ts_now
                             )
