@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <rect width="1200" height="700" fill="#101522"/>
+  <rect x="30" y="30" width="1140" height="640" rx="18" fill="#1c2335" stroke="#4a618f" stroke-width="2"/>
+  <text x="60" y="78" fill="#f0f6ff" font-size="34" font-family="Verdana, sans-serif">Events and Gait Analytics (Illustrative)</text>
+  <rect x="60" y="110" width="1080" height="180" rx="12" fill="#10192b" stroke="#35517f"/>
+  <rect x="60" y="310" width="1080" height="320" rx="12" fill="#10192b" stroke="#35517f"/>
+  <text x="84" y="145" fill="#dbe9ff" font-size="24" font-family="Verdana, sans-serif">Recent Events</text>
+  <rect x="84" y="165" width="260" height="42" rx="8" fill="#3c1e1e"/>
+  <text x="100" y="193" fill="#ff8d8d" font-size="18" font-family="Verdana, sans-serif">ALERT - Possible Fall</text>
+  <rect x="360" y="165" width="230" height="42" rx="8" fill="#2d2a17"/>
+  <text x="375" y="193" fill="#ffd46e" font-size="18" font-family="Verdana, sans-serif">Warning - Asymmetry</text>
+  <rect x="606" y="165" width="230" height="42" rx="8" fill="#173123"/>
+  <text x="620" y="193" fill="#7ce7a4" font-size="18" font-family="Verdana, sans-serif">Info - Walking Stable</text>
+  <text x="84" y="350" fill="#dbe9ff" font-size="24" font-family="Verdana, sans-serif">Gait Metrics</text>
+  <text x="100" y="390" fill="#b8c9e8" font-size="20" font-family="Verdana, sans-serif">Cadence</text>
+  <text x="300" y="390" fill="#e9f2ff" font-size="20" font-family="Verdana, sans-serif">102.4 steps/min</text>
+  <text x="100" y="430" fill="#b8c9e8" font-size="20" font-family="Verdana, sans-serif">Stride Length</text>
+  <text x="300" y="430" fill="#e9f2ff" font-size="20" font-family="Verdana, sans-serif">0.58 norm units</text>
+  <text x="100" y="470" fill="#b8c9e8" font-size="20" font-family="Verdana, sans-serif">Step Symmetry</text>
+  <text x="300" y="470" fill="#e9f2ff" font-size="20" font-family="Verdana, sans-serif">0.96</text>
+  <text x="100" y="510" fill="#b8c9e8" font-size="20" font-family="Verdana, sans-serif">Speed Estimate</text>
+  <text x="300" y="510" fill="#e9f2ff" font-size="20" font-family="Verdana, sans-serif">1.07 norm units/s</text>
+  <polyline points="700,560 740,530 780,540 820,500 860,488 900,460 940,468 980,445 1020,420 1060,430" fill="none" stroke="#65d4ff" stroke-width="4"/>
+  <text x="700" y="390" fill="#dbe9ff" font-size="22" font-family="Verdana, sans-serif">Rolling Cadence Trend</text>
+</svg>

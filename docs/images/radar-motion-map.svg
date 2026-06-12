@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#081421"/>
+      <stop offset="100%" stop-color="#0e2b3d"/>
+    </linearGradient>
+    <radialGradient id="pulse" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00d4ff" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#00d4ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="700" fill="url(#bg)"/>
+  <circle cx="280" cy="350" r="40" fill="#31d0ff"/>
+  <circle cx="280" cy="350" r="120" fill="none" stroke="#31d0ff" stroke-opacity="0.55" stroke-width="2"/>
+  <circle cx="280" cy="350" r="220" fill="none" stroke="#31d0ff" stroke-opacity="0.40" stroke-width="2"/>
+  <circle cx="280" cy="350" r="320" fill="none" stroke="#31d0ff" stroke-opacity="0.25" stroke-width="2"/>
+  <path d="M280 350 L930 220" stroke="#31d0ff" stroke-opacity="0.6" stroke-width="3"/>
+  <path d="M280 350 L880 470" stroke="#31d0ff" stroke-opacity="0.45" stroke-width="3"/>
+  <ellipse cx="860" cy="220" rx="90" ry="70" fill="url(#pulse)"/>
+  <ellipse cx="770" cy="470" rx="120" ry="85" fill="url(#pulse)"/>
+  <circle cx="860" cy="220" r="7" fill="#8cf7ff"/>
+  <circle cx="770" cy="470" r="7" fill="#8cf7ff"/>
+  <text x="50" y="70" fill="#d9f7ff" font-size="36" font-family="Verdana, sans-serif">WiFi-Radar Motion Heatmap (Illustrative)</text>
+  <text x="50" y="110" fill="#9ad8e3" font-size="22" font-family="Verdana, sans-serif">TX/RX antenna cluster emits CSI beams, reflections highlight human movement zones.</text>
+  <text x="820" y="190" fill="#d9f7ff" font-size="20" font-family="Verdana, sans-serif">Person A</text>
+  <text x="720" y="445" fill="#d9f7ff" font-size="20" font-family="Verdana, sans-serif">Person B</text>
+</svg>

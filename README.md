@@ -42,11 +42,42 @@ cameras.
 > Detailed implementation and reference material now lives under the docs folder,
 > keeping this README focused on the project, research context, and how to run it.
 
+---
+
+## Visual Gallery
+
+The images below are repository hosted visuals that demonstrate what the system looks like during runtime. They are intentionally placed in `docs/images/` so they render correctly on GitHub, in forks, and in pull request previews. You can replace these SVG assets with real screenshots from your environment while keeping the same file names.
+
+![Radar motion heatmap](docs/images/radar-motion-map.svg)
+
+This view represents spatial motion energy around the antenna array. It helps explain where strong reflections are coming from and gives operators an immediate sense of movement intensity in the monitored room.
+
+![Dashboard live monitor](docs/images/dashboard-live-monitor.svg)
+
+This panel style mirrors the live monitor experience, where 3-D skeleton estimation, confidence trends, and CSI traces are observed together to validate model health in real time.
+
+![Events and gait analytics panel](docs/images/events-gait-panel.svg)
+
+This event-centric view demonstrates how fall and gait signals are surfaced as actionable timeline events rather than raw numerical output.
+
+![3-D point cloud reading](docs/images/point-cloud-3d-view.svg)
+
+This point-cloud style visual approximates what WiFi-radar reflections and tracked keypoints look like in room coordinates. It is useful for communicating the distinction between raw RF reflection clusters and final pose estimates.
+
+![CSI reading waterfall](docs/images/csi-reading-waterfall.svg)
+
+This chart illustrates typical CSI amplitude and phase trajectories over time, which are the core signals used by tracking, gait, anomaly, and fusion modules.
+
+> [!TIP]
+> If you capture real screenshots from production runs, use a consistent 16:9 size and keep labels visible so readers can quickly map screenshots to README sections.
+
 ## Table of Contents
 
 - [Overview](#overview)
+- [Visual Gallery](#visual-gallery)
 - [Key Features](#key-features)
 - [Architecture Overview](#architecture-overview)
+- [Algorithms and Formula Summary](#algorithms-and-formula-summary)
 - [Research Background](#research-background)
 - [Technology Stack](#technology-stack)
 - [Requirements](#requirements)
@@ -109,6 +140,23 @@ The runtime pipeline is organised around a single orchestration entry point in
 **main.py**. CSI is collected, denoised, encoded, decoded into pose keypoints,
 and then routed into tracking, fall analysis, gait analytics, optional anomaly
 flagging, dashboard visualisation, RTMP streaming, and the optional REST API.
+
+---
+
+## Algorithms and Formula Summary
+
+This section gives an at-a-glance technical summary of the core algorithms used in the behavior modules. The project favors methods that are easy to interpret, easy to tune in live deployments, and computationally efficient for edge systems. For each module, the chosen approach is paired with the primary equation and a short rationale versus common alternatives.
+
+| Module | Algorithm | Core formula | Why this algorithm | Alternative and tradeoff |
+|---|---|---|---|---|
+| Multi-person tracking | Greedy centroid matching | $j^* = \arg\min_j ||c_t^{(i)} - c_{t-1}^{(j)}||_2$ | Fast and stable for 1 to 4 occupants with low latency | Hungarian assignment can be globally optimal but is heavier and unnecessary at low N |
+| Fall detection | Finite state machine with thresholds | $v_z < \tau_v$, $\theta > \tau_\theta$, $\frac{\Delta h}{h_0} > \tau_h$ | Interpretable and debuggable in real deployments | End-to-end fall classifiers are less transparent and harder to calibrate |
+| Gait analysis | Peak-based step extraction | $\text{cadence} = \frac{N_{steps}}{\Delta t} \times 60$ | Robust and explainable from ankle trajectory dynamics | Sequence regressors hide failure modes and need more labeled data |
+| Gait anomaly detection | Rolling z-score plus IsolationForest | $z_k = \frac{x_k - \mu_k}{\sigma_k + \epsilon}$ | Catches both single-metric spikes and multivariate drifts | Pure thresholding misses combined subtle abnormalities |
+| Hybrid activity fusion | Multi-window weighted fusion | $s = \sum_w \alpha_w m_w,\; r = f(s,p,g,q)$ | Resilient when one signal stream becomes noisy | Single-window scoring is more sensitive to transient noise |
+
+> [!IMPORTANT]
+> These formulas define runtime behavior and engineering heuristics. They are not a clinical claim, and any safety critical deployment should include environment specific validation.
 
 ---
 
@@ -342,44 +390,172 @@ exists.
 
 ## Multi-Person Tracking
 
-The runtime maintains stable person identities across frames so the monitoring
-stack can follow multiple occupants and associate alerts with the correct person.
+The runtime maintains stable person identities across frames so the monitoring stack can follow multiple occupants and associate alerts with the correct person. This is critical because every downstream module is person-scoped. If identity switches occur, the fall detector, gait history, and anomaly history become mixed across people and produce incorrect alerts.
+
+The tracker uses a greedy centroid matching policy between frame $t-1$ and frame $t$. For each current detection centroid $c_t^{(i)}$, the nearest previous centroid is selected under a match distance threshold:
+
+$$
+j^* = \arg\min_j ||c_t^{(i)} - c_{t-1}^{(j)}||_2
+$$
+
+Only matches that satisfy $||c_t^{(i)} - c_{t-1}^{(j^*)}||_2 < d_{max}$ are accepted. Unmatched tracks age out, and unmatched detections create new IDs.
+
+```mermaid
+flowchart LR
+  A[Detections at frame t] --> B[Compute centroids]
+  B --> C[Nearest match to active tracks]
+  C --> D{Distance < d_max?}
+  D -->|Yes| E[Assign existing ID]
+  D -->|No| F[Create new ID]
+  E --> G[Update track state]
+  F --> G
+  G --> H[Retire stale tracks]
+```
+
+| Choice | Why it is used here | Alternative |
+|---|---|---|
+| Greedy nearest-centroid | Very low latency and easy to debug with small person counts | Hungarian matching |
+| Fixed match threshold | Predictable behavior during tuning and deployment | Learned association network |
+| Track timeout aging | Avoids immediate ID loss during brief dropouts | Hard reset on miss |
+
+> [!NOTE]
+> For this project scale, deterministic behavior and simple calibration are more valuable than globally optimal assignment complexity.
 
 ---
 
 ## Fall Detection
 
-Falls are detected from motion, posture change, and recovery state, and surfaced
-live in the dashboard and API event stream.
+Falls are detected from motion, posture change, and recovery state, then surfaced in both the dashboard and REST API event stream. The detector is a finite state machine (FSM), which was chosen because it is interpretable and easy to calibrate for different environments.
+
+The detector combines three criteria:
+
+$$
+v_z < \tau_v, \quad \theta > \tau_\theta, \quad \frac{\Delta h}{h_0} > \tau_h
+$$
+
+- $v_z$ is vertical centroid velocity.
+- $\theta$ is torso angle from vertical.
+- $\Delta h/h_0$ is normalized height drop from the standing baseline.
+
+```mermaid
+stateDiagram-v2
+  [*] --> NORMAL
+  NORMAL --> POSSIBLE_FALL : vz < tau_v and theta > tau_theta
+  POSSIBLE_FALL --> FALL_DETECTED : height drop > tau_h
+  POSSIBLE_FALL --> NORMAL : upright recovery
+  FALL_DETECTED --> ALERT : timeout without recovery
+  FALL_DETECTED --> NORMAL : recovery observed
+  ALERT --> NORMAL : reset or recovery
+```
+
+| Signal | Why it matters | Failure mode if omitted |
+|---|---|---|
+| Vertical velocity | Captures sudden downward movement | Slow collapses can be missed |
+| Body angle | Distinguishes bending from falling | Many bend events become false alerts |
+| Height drop ratio | Confirms meaningful posture collapse | High-motion events over-trigger |
+
+> [!WARNING]
+> This is an engineering fall risk detector, not a medical certified fall diagnosis system.
 
 ---
 
 ## Gait Analysis
 
-The system estimates cadence, stride, symmetry, and walking-speed proxies from
-the rolling pose stream for continuous mobility monitoring.
+The system estimates cadence, stride, symmetry, and walking-speed proxies from the rolling pose stream for continuous mobility monitoring. It uses ankle trajectory minima as step events because foot strike naturally appears as a local minimum in ankle height.
+
+Cadence is computed as:
+
+$$
+  ext{cadence}_{spm} = \frac{N_{steps}}{\Delta t} \times 60
+$$
+
+Symmetry is computed as a ratio between left and right step intervals:
+
+$$
+  ext{symmetry} = \frac{\overline{T}_{left}}{\overline{T}_{right}}
+$$
+
+| Metric | Formula or method | Why chosen |
+|---|---|---|
+| Cadence | step count per time window | Stable and easy to interpret clinically |
+| Stride length proxy | distance between same-foot strikes | Works without explicit floor plane model |
+| Step symmetry | mean left/right interval ratio | Sensitive to limping and imbalance |
+| Speed estimate | hip midpoint displacement over time | Low-noise compared with ankle-only speed |
+
+> [!TIP]
+> Peak detection is robust in noisy CSI settings and gives explainable metrics that are easy to compare across sessions.
 
 ---
 
 ## Gait Anomaly Detection
 
-Unusual gait changes are flagged using rolling statistics and lightweight
-outlier detection to provide an early warning signal.
+Unusual gait changes are flagged using rolling statistics and lightweight outlier detection to provide an early warning signal. The detector combines robust z-score checks with an optional IsolationForest model for multi-feature anomalies.
+
+For each gait feature $x_k$:
+
+$$
+z_k = \frac{x_k - \mu_k}{\sigma_k + \epsilon}
+$$
+
+If $|z_k| > z_{thr}$ for key metrics, an anomaly reason is recorded. IsolationForest adds a multivariate perspective for gradual combined drifts that single thresholds may miss.
+
+| Detection layer | Strength | Weakness |
+|---|---|---|
+| Rolling z-score | Transparent per-metric reasoning | Less sensitive to weak multivariate shifts |
+| IsolationForest | Captures joint feature drift | Less interpretable than direct thresholds |
+
+> [!IMPORTANT]
+> Warm-up samples are required before anomaly output is meaningful. Early frames are baseline-building, not decision-grade.
 
 ---
 
 ## Hybrid Activity Fusion
 
-A recent addition combines CSI motion evidence, pose confidence, and gait
-signals into a more robust live activity estimate for walking, stationary,
-high-motion, and possible-fall states.
+A recent addition combines CSI motion evidence, pose confidence, and gait signals into a more robust live activity estimate for walking, stationary, high-motion, transition, and possible-fall states. This module improves stability when one modality briefly drops in quality.
+
+Motion is scored across multiple windows and fused with weighted coefficients:
+
+$$
+s = \sum_{w \in W} \alpha_w m_w, \qquad \sum_{w \in W} \alpha_w = 1
+$$
+
+Final risk is produced from fused motion, pose reliability, gait context, and geometry factor:
+
+$$
+r = f(s, p, g, q)
+$$
+
+where $p$ is pose reliability, $g$ is gait context, and $q$ is layout quality metadata.
+
+```mermaid
+flowchart TD
+  A[CSI amplitude and phase deltas] --> B[Windowed motion scores]
+  C[Pose confidence] --> D[Pose reliability]
+  E[Gait metrics] --> F[Gait context score]
+  G[Layout metadata] --> H[Geometry scaling]
+  B --> I[Fusion heuristic]
+  D --> I
+  F --> I
+  H --> I
+  I --> J[Activity label]
+  I --> K[Fall risk]
+```
+
+| Fusion component | Why included | What it protects against |
+|---|---|---|
+| Multi-window motion | Captures both short and sustained movement | One-frame spikes and dropouts |
+| Pose reliability term | Discounts low-confidence keypoint periods | Skeleton jitter from weak signal |
+| Gait context term | Anchors classification to mobility pattern | Mislabeling fast transitions |
+| Geometry scaling | Adapts confidence to antenna setup quality | Overconfidence in poor layouts |
+
+> [!NOTE]
+> Hybrid outputs are published into both `gait_metrics` and `csi_summary` so API clients can consume a single coherent state packet.
 
 ---
 
 ## REST API and Headless Mode
 
-WiFi-Radar can now run without the dashboard for embedded or service-style
-integrations.
+WiFi-Radar can now run without the dashboard for embedded or service-style integrations. In headless mode, the processing pipeline continues to ingest CSI, run inference, and publish events and metrics to FastAPI. This pattern is useful for integrations such as smart-home controllers, backend analytics pipelines, and edge gateways where a browser dashboard is not required.
 
 ```mermaid
 sequenceDiagram
@@ -394,16 +570,28 @@ sequenceDiagram
     API-->>User: JSON health and state snapshot
 ```
 
-Core endpoints:
+<details>
+<summary><strong>Full API Reference (click to expand)</strong></summary>
 
-- `GET /health`
-- `GET /status`
-- `GET /config`
-- `POST /config`
-- `POST /ingest`
-- `GET /people`
-- `GET /events`
-- `GET /metrics/gait`
+| Method | Endpoint | Purpose | Typical response fields |
+|---|---|---|---|
+| `GET` | `/` | Service identity and docs path | `service`, `docs` |
+| `GET` | `/health` | Liveness and uptime check | `status`, `uptime_s` |
+| `GET` | `/status` | Runtime summary | `tracked_count`, `event_count`, `simulation_mode` |
+| `GET` | `/config` | Current merged runtime config | `config` |
+| `POST` | `/config` | Patch runtime config in memory | `config` |
+| `POST` | `/ingest` | Push pipeline snapshots and events | `accepted`, `tracked_count`, `event_count` |
+| `GET` | `/people` | Tracked people with keypoints and confidence | `tracked_people` |
+| `GET` | `/events` | Recent fall and anomaly events | `events` |
+| `GET` | `/metrics/gait` | Latest gait metrics packet | `gait_metrics` |
+
+</details>
+
+> [!TIP]
+> Use `GET /status` for lightweight polling loops and `GET /events` for event-driven workflows. This combination keeps traffic low while still capturing all critical alerts.
+
+> [!NOTE]
+> `POST /config` updates in-memory runtime settings. The dashboard configuration save path persists settings to YAML and then propagates those values into runtime state.
 
 Example:
 

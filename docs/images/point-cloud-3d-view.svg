@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <defs>
+    <linearGradient id="bg3d" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1324"/>
+      <stop offset="100%" stop-color="#101f3b"/>
+    </linearGradient>
+    <linearGradient id="grid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2d4473" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#2d4473" stop-opacity="0.1"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="700" fill="url(#bg3d)"/>
+
+  <text x="44" y="60" fill="#e7f2ff" font-size="34" font-family="Verdana, sans-serif">3-D Point Cloud Reading (Illustrative)</text>
+  <text x="44" y="96" fill="#97b8dd" font-size="20" font-family="Verdana, sans-serif">Pose keypoints and reflected CSI energy rendered in room coordinates.</text>
+
+  <polygon points="180,560 1020,560 900,290 300,290" fill="url(#grid)" stroke="#5477b8" stroke-width="2"/>
+  <line x1="300" y1="290" x2="300" y2="170" stroke="#4f6ca1" stroke-width="2"/>
+  <line x1="900" y1="290" x2="900" y2="170" stroke="#4f6ca1" stroke-width="2"/>
+  <line x1="180" y1="560" x2="180" y2="440" stroke="#4f6ca1" stroke-width="2"/>
+  <line x1="1020" y1="560" x2="1020" y2="440" stroke="#4f6ca1" stroke-width="2"/>
+
+  <line x1="300" y1="290" x2="900" y2="290" stroke="#6285c7" stroke-width="1" stroke-opacity="0.45"/>
+  <line x1="260" y1="380" x2="980" y2="380" stroke="#6285c7" stroke-width="1" stroke-opacity="0.35"/>
+  <line x1="220" y1="470" x2="1060" y2="470" stroke="#6285c7" stroke-width="1" stroke-opacity="0.30"/>
+  <line x1="180" y1="560" x2="1020" y2="560" stroke="#6285c7" stroke-width="1" stroke-opacity="0.25"/>
+
+  <circle cx="420" cy="240" r="4" fill="#62d3ff"/>
+  <circle cx="450" cy="255" r="4" fill="#62d3ff"/>
+  <circle cx="490" cy="275" r="4" fill="#62d3ff"/>
+  <circle cx="530" cy="300" r="4" fill="#62d3ff"/>
+  <circle cx="560" cy="335" r="4" fill="#62d3ff"/>
+  <circle cx="580" cy="370" r="4" fill="#62d3ff"/>
+  <circle cx="600" cy="410" r="4" fill="#62d3ff"/>
+  <circle cx="620" cy="445" r="4" fill="#62d3ff"/>
+  <circle cx="640" cy="470" r="4" fill="#62d3ff"/>
+
+  <circle cx="760" cy="250" r="5" fill="#ffbe63"/>
+  <circle cx="790" cy="270" r="5" fill="#ffbe63"/>
+  <circle cx="820" cy="300" r="5" fill="#ffbe63"/>
+  <circle cx="840" cy="340" r="5" fill="#ffbe63"/>
+  <circle cx="850" cy="385" r="5" fill="#ffbe63"/>
+  <circle cx="860" cy="430" r="5" fill="#ffbe63"/>
+
+  <line x1="560" y1="250" x2="560" y2="340" stroke="#9ce5ff" stroke-width="5"/>
+  <line x1="560" y1="275" x2="520" y2="320" stroke="#9ce5ff" stroke-width="5"/>
+  <line x1="560" y1="275" x2="600" y2="320" stroke="#9ce5ff" stroke-width="5"/>
+  <line x1="560" y1="340" x2="530" y2="430" stroke="#9ce5ff" stroke-width="5"/>
+  <line x1="560" y1="340" x2="590" y2="430" stroke="#9ce5ff" stroke-width="5"/>
+  <circle cx="560" cy="230" r="18" fill="#9ce5ff"/>
+
+  <circle cx="250" cy="520" r="18" fill="#3ee0ff"/>
+  <circle cx="250" cy="520" r="90" fill="none" stroke="#3ee0ff" stroke-opacity="0.35" stroke-width="2"/>
+  <line x1="250" y1="520" x2="560" y2="320" stroke="#3ee0ff" stroke-width="2" stroke-opacity="0.55"/>
+  <line x1="250" y1="520" x2="840" y2="340" stroke="#3ee0ff" stroke-width="2" stroke-opacity="0.35"/>
+
+  <text x="280" y="520" fill="#b8d7ff" font-size="18" font-family="Verdana, sans-serif">Antenna Array</text>
+  <text x="594" y="225" fill="#dff3ff" font-size="18" font-family="Verdana, sans-serif">Tracked Person (ID 1)</text>
+  <text x="875" y="338" fill="#ffd396" font-size="18" font-family="Verdana, sans-serif">Reflection Cluster</text>
+</svg>

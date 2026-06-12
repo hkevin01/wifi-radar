@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <rect width="1200" height="700" fill="#121826"/>
+  <rect x="28" y="28" width="1144" height="644" rx="18" fill="#1e2638" stroke="#4f6aa0" stroke-width="2"/>
+  <rect x="56" y="68" width="760" height="560" rx="12" fill="#0f1725" stroke="#3b4f77"/>
+  <rect x="840" y="68" width="304" height="170" rx="12" fill="#0f1725" stroke="#3b4f77"/>
+  <rect x="840" y="256" width="304" height="170" rx="12" fill="#0f1725" stroke="#3b4f77"/>
+  <rect x="840" y="444" width="304" height="184" rx="12" fill="#0f1725" stroke="#3b4f77"/>
+  <text x="74" y="108" fill="#e7f0ff" font-size="26" font-family="Verdana, sans-serif">Live 3-D Pose Monitor</text>
+  <text x="860" y="102" fill="#e7f0ff" font-size="20" font-family="Verdana, sans-serif">Confidence</text>
+  <text x="860" y="290" fill="#e7f0ff" font-size="20" font-family="Verdana, sans-serif">CSI Signal</text>
+  <text x="860" y="478" fill="#e7f0ff" font-size="20" font-family="Verdana, sans-serif">System Health</text>
+  <polyline points="870,200 900,185 930,195 960,170 990,162 1020,150 1050,146 1080,140 1110,130" fill="none" stroke="#4bd2ff" stroke-width="3"/>
+  <polyline points="870,388 900,372 930,394 960,350 990,330 1020,310 1050,298 1080,276 1110,265" fill="none" stroke="#ffbf6b" stroke-width="3"/>
+  <circle cx="1120" cy="486" r="10" fill="#4ade80"/>
+  <text x="860" y="520" fill="#b7c9ed" font-size="18" font-family="Verdana, sans-serif">Pipeline: Running at 20 Hz</text>
+  <text x="860" y="548" fill="#b7c9ed" font-size="18" font-family="Verdana, sans-serif">Tracked People: 2</text>
+  <text x="860" y="576" fill="#b7c9ed" font-size="18" font-family="Verdana, sans-serif">API: Enabled</text>
+  <line x1="400" y1="180" x2="400" y2="310" stroke="#62d4ff" stroke-width="5"/>
+  <line x1="400" y1="220" x2="340" y2="270" stroke="#62d4ff" stroke-width="5"/>
+  <line x1="400" y1="220" x2="460" y2="270" stroke="#62d4ff" stroke-width="5"/>
+  <line x1="400" y1="310" x2="350" y2="430" stroke="#62d4ff" stroke-width="5"/>
+  <line x1="400" y1="310" x2="450" y2="430" stroke="#62d4ff" stroke-width="5"/>
+  <circle cx="400" cy="150" r="24" fill="#62d4ff"/>
+  <text x="50" y="48" fill="#9bb2da" font-size="22" font-family="Verdana, sans-serif">WiFi-Radar Dashboard (Illustrative)</text>
+</svg>
