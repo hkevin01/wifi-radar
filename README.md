@@ -26,6 +26,28 @@ Channel State Information from commodity WiFi hardware or the built-in
 simulation pipeline, transforms it into learned embeddings, and emits
 17-keypoint 3-D pose outputs in real time.
 
+### What WiFi-Radar Is, How It Works, and What It Finds
+
+WiFi-Radar is a camera-free sensing system that uses normal WiFi signal reflections to infer human movement. Instead of images, it reads CSI (Channel State Information), which captures how radio waves change when people move, stand, walk, or fall in a room. That means the system can monitor activity without recording visual identity data.
+
+At runtime, the pipeline works in five steps:
+
+1. Collect CSI frames from a router or simulator.
+2. Clean and normalize amplitude and phase signals.
+3. Encode temporal signal patterns into pose features.
+4. Decode features into 3-D human keypoints and stable person IDs.
+5. Run behavior modules to produce fall, gait, anomaly, and activity outputs.
+
+What the system finds in practice:
+
+- **Who is present and where**: multi-person tracking with stable IDs.
+- **How each person is moving**: stationary, walking, transition, high-motion.
+- **Whether motion resembles a fall pattern**: state-machine and hybrid fall risk.
+- **How gait is changing over time**: cadence, stride proxy, symmetry, speed.
+- **Whether behavior is unusual**: rolling anomaly detection on gait trends.
+
+This repository is designed for readable, explainable behavior analytics. The algorithms were selected so operators can inspect why a decision was made, tune thresholds per environment, and deploy on resource-constrained edge hardware.
+
 This repository is aimed at **researchers, embedded/edge developers, and
 privacy-first sensing prototypes** that need room-scale awareness without
 cameras.
@@ -74,6 +96,7 @@ This chart illustrates typical CSI amplitude and phase trajectories over time, w
 ## Table of Contents
 
 - [Overview](#overview)
+- [What WiFi-Radar Is, How It Works, and What It Finds](#what-wifi-radar-is-how-it-works-and-what-it-finds)
 - [Visual Gallery](#visual-gallery)
 - [Key Features](#key-features)
 - [Architecture Overview](#architecture-overview)
