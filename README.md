@@ -172,7 +172,7 @@ This section gives an at-a-glance technical summary of the core algorithms used 
 
 | Module | Algorithm | Core formula | Why this algorithm | Alternative and tradeoff |
 |---|---|---|---|---|
-| Multi-person tracking | Greedy centroid matching | $j^* = \arg\min_j ||c_t^{(i)} - c_{t-1}^{(j)}||_2$ | Fast and stable for 1 to 4 occupants with low latency | Hungarian assignment can be globally optimal but is heavier and unnecessary at low N |
+| Multi-person tracking | Greedy centroid matching | $j^* = \operatorname*{arg\,min}_j \lVert c_t^{(i)} - c_{t-1}^{(j)} \rVert_2$ | Fast and stable for 1 to 4 occupants with low latency | Hungarian assignment can be globally optimal but is heavier and unnecessary at low N |
 | Fall detection | Finite state machine with thresholds | $v_z < \tau_v$, $\theta > \tau_\theta$, $\frac{\Delta h}{h_0} > \tau_h$ | Interpretable and debuggable in real deployments | End-to-end fall classifiers are less transparent and harder to calibrate |
 | Gait analysis | Peak-based step extraction | $\text{cadence} = \frac{N_{steps}}{\Delta t} \times 60$ | Robust and explainable from ankle trajectory dynamics | Sequence regressors hide failure modes and need more labeled data |
 | Gait anomaly detection | Rolling z-score plus IsolationForest | $z_k = \frac{x_k - \mu_k}{\sigma_k + \epsilon}$ | Catches both single-metric spikes and multivariate drifts | Pure thresholding misses combined subtle abnormalities |
@@ -418,10 +418,10 @@ The runtime maintains stable person identities across frames so the monitoring s
 The tracker uses a greedy centroid matching policy between frame $t-1$ and frame $t$. For each current detection centroid $c_t^{(i)}$, the nearest previous centroid is selected under a match distance threshold:
 
 $$
-j^* = \arg\min_j ||c_t^{(i)} - c_{t-1}^{(j)}||_2
+j^* = \operatorname*{arg\,min}_j \lVert c_t^{(i)} - c_{t-1}^{(j)} \rVert_2
 $$
 
-Only matches that satisfy $||c_t^{(i)} - c_{t-1}^{(j^*)}||_2 < d_{max}$ are accepted. Unmatched tracks age out, and unmatched detections create new IDs.
+Only matches that satisfy $\lVert c_t^{(i)} - c_{t-1}^{(j^*)} \rVert_2 < d_{max}$ are accepted. Unmatched tracks age out, and unmatched detections create new IDs.
 
 ```mermaid
 flowchart LR
