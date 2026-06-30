@@ -133,8 +133,8 @@ This chart illustrates typical CSI amplitude and phase trajectories over time, w
 | <sub>👥</sub> | <sub>Multi-person tracking</sub> | <sub>Stable IDs via greedy centroid matching</sub> | <sub>High</sub> | <sub>✅ Stable</sub> |
 | <sub>🚨</sub> | <sub>Fall detection</sub> | <sub>Velocity + body-angle state machine for alerts</sub> | <sub>High</sub> | <sub>✅ Stable</sub> |
 | <sub>🚶</sub> | <sub>Gait analytics</sub> | <sub>Cadence, stride, symmetry, and speed metrics</sub> | <sub>High</sub> | <sub>✅ Stable</sub> |
-| <sub>🩺</sub> | <sub>Gait anomaly detection</sub> | <sub>Rolling abnormality detection using gait metrics</sub> | <sub>Medium</sub> | <sub>🧪 Experimental</sub> |
-| <sub>🔀</sub> | <sub>Hybrid CSI + pose fusion</sub> | <sub>Multi-window motion fusion with pose and gait cues for more robust live activity scoring</sub> | <sub>Medium</sub> | <sub>🧪 Experimental</sub> |
+| <sub>🩺</sub> | <sub>Gait anomaly detection</sub> | <sub>Per-person robust anomaly scoring with temporal consistency and feature-quality weighting</sub> | <sub>Medium</sub> | <sub>🧪 Experimental</sub> |
+| <sub>🔀</sub> | <sub>Hybrid CSI + pose fusion</sub> | <sub>Multi-window motion fusion with anomaly-aware fall risk regularization</sub> | <sub>Medium</sub> | <sub>🧪 Experimental</sub> |
 | <sub>🌐</sub> | <sub>REST API</sub> | <sub>Headless integration endpoints for status, config, events, and metrics</sub> | <sub>High</sub> | <sub>🧪 Experimental</sub> |
 | <sub>⚡</sub> | <sub>ONNX and TensorRT export</sub> | <sub>Edge deployment path for Jetson-style hardware</sub> | <sub>High</sub> | <sub>🧪 Experimental</sub> |
 | <sub>🧪</sub> | <sub>Transfer learning workflow</sub> | <sub>Fine-tune on real-world CSI datasets in NPZ format</sub> | <sub>High</sub> | <sub>🧪 Experimental</sub> |
@@ -175,8 +175,8 @@ This section gives an at-a-glance technical summary of the core algorithms used 
 | Multi-person tracking | Greedy centroid matching | $j^* = \arg\min_j \|c_t^{(i)} - c_{t-1}^{(j)}\|_2$ | Fast and stable for 1 to 4 occupants with low latency | Hungarian assignment can be globally optimal but is heavier and unnecessary at low N |
 | Fall detection | Finite state machine with thresholds | $v_z < \tau_v$, $\theta > \tau_\theta$, $\frac{\Delta h}{h_0} > \tau_h$ | Interpretable and debuggable in real deployments | End-to-end fall classifiers are less transparent and harder to calibrate |
 | Gait analysis | Peak-based step extraction | $\text{cadence} = \frac{N_{steps}}{\Delta t} \times 60$ | Robust and explainable from ankle trajectory dynamics | Sequence regressors hide failure modes and need more labeled data |
-| Gait anomaly detection | Rolling z-score plus IsolationForest | $z_k = \frac{x_k - \mu_k}{\sigma_k + \epsilon}$ | Catches both single-metric spikes and multivariate drifts | Pure thresholding misses combined subtle abnormalities |
-| Hybrid activity fusion | Multi-window weighted fusion | $s = \sum_w \alpha_w m_w,\; r = f(s,p,g,q)$ | Resilient when one signal stream becomes noisy | Single-window scoring is more sensitive to transient noise |
+| Gait anomaly detection | Robust per-person stats with temporal debounce | $z_k^{rob} = \frac{|x_k-\text{median}_k|}{1.4826\,\text{MAD}_k+\epsilon}$, $z_k^*=\lambda z_k^{rob}+(1-\lambda)z_k$ | More stable under outliers and identity switches | Pure mean/std z-score can overreact to burst noise |
+| Hybrid activity fusion | Multi-window weighted fusion + anomaly coupling | $s = \sum_w \alpha_w m_w,\; r = (1-\omega_a)r_0 + \omega_a a$ | Resilient when one stream is noisy and gait quality changes | Motion-only risk misses gradual gait degradation cues |
 
 > [!IMPORTANT]
 > These formulas define runtime behavior and engineering heuristics. They are not a clinical claim, and any safety critical deployment should include environment specific validation.
@@ -512,20 +512,28 @@ $$
 
 ## Gait Anomaly Detection
 
-Unusual gait changes are flagged using rolling statistics and lightweight outlier detection to provide an early warning signal. The detector combines robust z-score checks with an optional IsolationForest model for multi-feature anomalies.
+Unusual gait changes are flagged per tracked person using robust rolling baselines, temporal consistency smoothing, and optional unsupervised outlier scoring. The detector now keeps profile-local histories keyed by person identity, so baseline transfer between people is reduced.
 
-For each gait feature $x_k$:
+For each gait feature $x_k$, both classical and robust deviations are computed:
 
 $$
-z_k = \frac{x_k - \mu_k}{\sigma_k + \epsilon}
+z_k = \frac{|x_k-\mu_k|}{\sigma_k+\epsilon}, \qquad
+z_k^{rob} = \frac{|x_k-\text{median}_k|}{1.4826\,\text{MAD}_k+\epsilon}
 $$
 
-If $|z_k| > z_{thr}$ for key metrics, an anomaly reason is recorded. IsolationForest adds a multivariate perspective for gradual combined drifts that single thresholds may miss.
+The runtime score blends them with feature-level quality weights $w_k$ (derived from step count, window duration, and identity persistence):
+
+$$
+z_k^* = w_k\big(\lambda z_k^{rob} + (1-\lambda) z_k\big)
+$$
+
+Severity transitions are then regularized with an EMA plus debounce frames, so one anomalous window does not immediately escalate to high severity.
 
 | Detection layer | Strength | Weakness |
 |---|---|---|
-| Rolling z-score | Transparent per-metric reasoning | Less sensitive to weak multivariate shifts |
-| IsolationForest | Captures joint feature drift | Less interpretable than direct thresholds |
+| Robust per-person deviation scoring | Handles outliers and drift without cross-person leakage | Needs warm-up history for each identity |
+| Temporal EMA plus debounce | Suppresses one-window severity spikes | Slightly delays escalation on sustained events |
+| IsolationForest (optional) | Captures multivariate drift patterns | Less interpretable than direct thresholds |
 
 > [!IMPORTANT]
 > Warm-up samples are required before anomaly output is meaningful. Early frames are baseline-building, not decision-grade.
@@ -542,13 +550,13 @@ $$
 s = \sum_{w \in W} \alpha_w m_w, \qquad \sum_{w \in W} \alpha_w = 1
 $$
 
-Final risk is produced from fused motion, pose reliability, gait context, and geometry factor:
+Final risk is produced from fused motion, pose reliability, gait context, geometry factor, and anomaly severity coupling:
 
 $$
-r = f(s, p, g, q)
+r = (1-\omega_a)\,f(s,p,g,q) + \omega_a\,a
 $$
 
-where $p$ is pose reliability, $g$ is gait context, and $q$ is layout quality metadata.
+where $p$ is pose reliability, $g$ is gait context, $q$ is layout quality metadata, and $a$ is normalized gait-anomaly severity.
 
 ```mermaid
 flowchart TD
@@ -569,6 +577,7 @@ flowchart TD
 | Multi-window motion | Captures both short and sustained movement | One-frame spikes and dropouts |
 | Pose reliability term | Discounts low-confidence keypoint periods | Skeleton jitter from weak signal |
 | Gait context term | Anchors classification to mobility pattern | Mislabeling fast transitions |
+| Gait anomaly coupling | Injects trend-level instability evidence into risk | Missing gradual deterioration during noisy CSI windows |
 | Geometry scaling | Adapts confidence to antenna setup quality | Overconfidence in poor layouts |
 
 > [!NOTE]
@@ -607,11 +616,15 @@ sequenceDiagram
 | `GET` | `/people` | Tracked people with keypoints and confidence | `tracked_people` |
 | `GET` | `/events` | Recent fall and anomaly events | `events` |
 | `GET` | `/metrics/gait` | Latest gait metrics packet | `gait_metrics` |
+| `GET` | `/metrics/hybrid/people` | Per-person hybrid summaries | `per_person_hybrid` |
 
 </details>
 
 > [!TIP]
 > Use `GET /status` for lightweight polling loops and `GET /events` for event-driven workflows. This combination keeps traffic low while still capturing all critical alerts.
+
+> [!TIP]
+> Use `GET /metrics/hybrid/people` when integrations need person-specific hybrid activity, motion thresholds, and fall-risk details instead of only lead-person summaries.
 
 > [!NOTE]
 > `POST /config` updates in-memory runtime settings. The dashboard configuration save path persists settings to YAML and then propagates those values into runtime state.
@@ -907,6 +920,11 @@ gantt
 - [x] REST API for headless / embedded integration
 - [x] Automated test suite with coverage reporting
 - [x] Anomaly detection for unusual gait patterns
+- [x] Temporal consistency regularization for gait anomaly severity (EMA plus debounce)
+- [x] Per-person anomaly baselines keyed by identity persistence
+- [x] Feature-level confidence weighting in anomaly scoring using step and window quality
+- [x] Hybrid fall-risk coupling with calibrated gait-anomaly severity term
+- [x] Long-horizon drift vs abrupt-anomaly regression tests and mixed RF-burst false-positive evaluation
 - [x] Extended real-hardware validation against live CSI captures
 - [x] Broader end-to-end regression coverage across the dashboard and streaming stack
 
