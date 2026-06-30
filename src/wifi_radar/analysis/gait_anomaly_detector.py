@@ -75,6 +75,9 @@ class GaitAnomalyDetector:
         z_threshold: float = 3.0,
         contamination: float = 0.1,
         random_state: int = 42,
+        robust_weight: float = 0.65,
+        clip_sigma: float = 4.0,
+        min_scale: float = 1e-3,
     ) -> None:
         """Initialise the rolling baseline and optional anomaly model.
 
@@ -113,6 +116,9 @@ class GaitAnomalyDetector:
         self._warmup_samples = warmup_samples
         self._z_threshold = z_threshold
         self._random_state = random_state
+        self._robust_weight = float(np.clip(robust_weight, 0.0, 1.0))
+        self._clip_sigma = float(max(1.0, clip_sigma))
+        self._min_scale = float(max(1e-6, min_scale))
         self._model = (
             IsolationForest(
                 n_estimators=100,
@@ -171,12 +177,19 @@ class GaitAnomalyDetector:
 
         baseline = np.vstack(self._history)
         mean = baseline.mean(axis=0)
-        std = np.where(baseline.std(axis=0) < 1e-6, 1e-6, baseline.std(axis=0))
+        median = np.median(baseline, axis=0)
+        mad = np.median(np.abs(baseline - median), axis=0)
+        scale_floor = np.maximum(self._min_scale, 0.03 * np.maximum(np.abs(median), 0.1))
+        std = np.where(baseline.std(axis=0) < scale_floor, scale_floor, baseline.std(axis=0))
+        robust_scale = np.where(1.4826 * mad < scale_floor, scale_floor, 1.4826 * mad)
+
         z_scores = np.abs((current - mean) / std)
+        robust_z = np.abs((current - median) / robust_scale)
+        blended_z = self._robust_weight * robust_z + (1.0 - self._robust_weight) * z_scores
         names = ["cadence", "stride_length", "step_symmetry", "speed_est"]
         reasons = [
             f"{name} deviated by {z:.1f}σ"
-            for name, z in zip(names, z_scores)
+            for name, z in zip(names, blended_z)
             if z >= self._z_threshold
         ]
 
@@ -187,10 +200,10 @@ class GaitAnomalyDetector:
             if self._model_ready:
                 iso_score = float(self._model.decision_function(current.reshape(1, -1))[0])
                 iso_pred = int(self._model.predict(current.reshape(1, -1))[0])
-                if iso_pred == -1:
+                if iso_pred == -1 and float(blended_z.max()) >= self._z_threshold * 0.6:
                     reasons.append("unsupervised model marked the gait pattern as abnormal")
 
-        score = float(z_scores.max())
+        score = float(blended_z.max())
         is_anomaly = bool(reasons)
         if iso_score < 0:
             score = max(score, abs(iso_score) * 10.0)
@@ -199,13 +212,20 @@ class GaitAnomalyDetector:
         if is_anomaly:
             severity = "high" if score >= self._z_threshold * 1.5 else "moderate"
 
-        self._history.append(current)
+        history_sample = current
+        if is_anomaly:
+            lo = median - self._clip_sigma * robust_scale
+            hi = median + self._clip_sigma * robust_scale
+            history_sample = np.clip(current, lo, hi).astype(np.float32)
+
+        self._history.append(history_sample)
         return {
             "is_anomaly": is_anomaly,
             "severity": severity,
             "score": round(score, 3),
             "reasons": reasons,
             "history_size": len(self._history),
+            "robust_score": round(float(robust_z.max()), 3),
         }
 
     def reset(self) -> None:
