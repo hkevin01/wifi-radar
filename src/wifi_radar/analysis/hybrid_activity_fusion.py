@@ -53,6 +53,17 @@ class HybridActivityFusion:
         noise_floor_k: float = 2.0,
         min_motion_scale: float = 0.05,
         hysteresis_frames: int = 3,
+        adaptive_motion_thresholds: bool = True,
+        threshold_warmup_frames: int = 24,
+        threshold_alpha: float = 0.08,
+        threshold_dev_alpha: float = 0.10,
+        threshold_k: float = 2.0,
+        min_stationary_threshold: float = 0.02,
+        max_stationary_threshold: float = 0.20,
+        high_threshold_multiplier: float = 3.0,
+        max_high_motion_threshold: float = 0.60,
+        fall_risk_alpha_rise: float = 0.45,
+        fall_risk_alpha_fall: float = 0.12,
     ) -> None:
         """Initialise rolling fusion buffers and thresholds.
 
@@ -82,6 +93,17 @@ class HybridActivityFusion:
         self.noise_floor_k = float(max(0.0, noise_floor_k))
         self.min_motion_scale = float(max(1e-4, min_motion_scale))
         self.hysteresis_frames = int(max(1, hysteresis_frames))
+        self.adaptive_motion_thresholds = bool(adaptive_motion_thresholds)
+        self.threshold_warmup_frames = int(max(1, threshold_warmup_frames))
+        self.threshold_alpha = float(np.clip(threshold_alpha, 1e-4, 1.0))
+        self.threshold_dev_alpha = float(np.clip(threshold_dev_alpha, 1e-4, 1.0))
+        self.threshold_k = float(max(0.0, threshold_k))
+        self.min_stationary_threshold = float(max(1e-4, min_stationary_threshold))
+        self.max_stationary_threshold = float(max(self.min_stationary_threshold, max_stationary_threshold))
+        self.high_threshold_multiplier = float(max(1.2, high_threshold_multiplier))
+        self.max_high_motion_threshold = float(max(self.high_motion_threshold, max_high_motion_threshold))
+        self.fall_risk_alpha_rise = float(np.clip(fall_risk_alpha_rise, 1e-4, 1.0))
+        self.fall_risk_alpha_fall = float(np.clip(fall_risk_alpha_fall, 1e-4, 1.0))
 
         self._prev_amplitude: Optional[np.ndarray] = None
         self._prev_phase: Optional[np.ndarray] = None
@@ -94,6 +116,12 @@ class HybridActivityFusion:
         self._active_label: Optional[str] = None
         self._pending_label: Optional[str] = None
         self._pending_label_frames: int = 0
+        self._threshold_frames: int = 0
+        self._motion_threshold_ema: float = self.motion_threshold
+        self._motion_threshold_dev_ema: float = 0.0
+        self._adaptive_motion_threshold: float = self.motion_threshold
+        self._adaptive_high_motion_threshold: float = self.high_motion_threshold
+        self._fall_risk_ema: Optional[float] = None
 
     def reset(self) -> None:
         """Reset all internal state for a new session.
@@ -119,6 +147,12 @@ class HybridActivityFusion:
         self._active_label = None
         self._pending_label = None
         self._pending_label_frames = 0
+        self._threshold_frames = 0
+        self._motion_threshold_ema = self.motion_threshold
+        self._motion_threshold_dev_ema = 0.0
+        self._adaptive_motion_threshold = self.motion_threshold
+        self._adaptive_high_motion_threshold = self.high_motion_threshold
+        self._fall_risk_ema = None
 
     def update(
         self,
@@ -170,16 +204,20 @@ class HybridActivityFusion:
         motion_after_floor, adaptive_floor = self._apply_adaptive_floor(fused_motion)
         geometry_scale = self._estimate_geometry_scale(layout_metadata)
         motion_score = motion_after_floor * geometry_scale
+        self._update_adaptive_motion_thresholds(motion_score=motion_score, fall_severity=fall_severity)
+        active_motion_threshold, active_high_motion_threshold = self._current_motion_thresholds()
 
         pose_reliability = float(np.clip(np.nanmean(pose_confidence), 0.0, 1.0)) if pose_confidence is not None else 0.0
         gait_summary = self._normalize_gait_metrics(gait_metrics)
         gait_reliability = gait_summary["gait_reliability"]
-        fall_risk = self._compute_fall_risk(
+        raw_fall_risk = self._compute_fall_risk(
             motion_score=motion_score,
             pose_reliability=pose_reliability,
             gait_summary=gait_summary,
             fall_severity=fall_severity,
+            active_high_motion_threshold=active_high_motion_threshold,
         )
+        fall_risk = self._smooth_fall_risk(raw_fall_risk=raw_fall_risk, fall_severity=fall_severity)
 
         label = self._classify(
             motion_score=motion_score,
@@ -187,6 +225,8 @@ class HybridActivityFusion:
             pose_reliability=pose_reliability,
             fall_risk=fall_risk,
             fall_severity=fall_severity,
+            active_motion_threshold=active_motion_threshold,
+            active_high_motion_threshold=active_high_motion_threshold,
         )
         self._label_history.append(label)
         voted_label = self._stable_vote(label)
@@ -197,9 +237,13 @@ class HybridActivityFusion:
             "motion_score": float(motion_score),
             "raw_motion_score": float(fused_motion),
             "adaptive_noise_floor": float(adaptive_floor),
+            "motion_threshold_active": float(active_motion_threshold),
+            "high_motion_threshold_active": float(active_high_motion_threshold),
             "pose_reliability": float(pose_reliability),
             "gait_reliability": float(gait_reliability),
             "fall_risk": float(fall_risk),
+            "raw_fall_risk": float(raw_fall_risk),
+            "fall_risk_ema": float(fall_risk),
             "geometry_scale": float(geometry_scale),
             "cadence_spm": float(gait_summary["cadence_spm"]),
             "speed_est": float(gait_summary["speed_est"]),
@@ -325,15 +369,27 @@ class HybridActivityFusion:
         pose_reliability: float,
         gait_summary: Dict[str, float],
         fall_severity: int,
+        active_high_motion_threshold: float,
     ) -> float:
         severity_term = float(np.clip(fall_severity / 2.0, 0.0, 1.0))
         symmetry_term = float(np.clip((0.7 - gait_summary["step_symmetry"]) / 0.7, 0.0, 1.0))
         pose_term = float(np.clip((0.6 - pose_reliability) / 0.6, 0.0, 1.0))
-        motion_term = float(np.clip(motion_score / max(self.high_motion_threshold, 1e-6), 0.0, 1.0))
+        motion_term = float(np.clip(motion_score / max(active_high_motion_threshold, 1e-6), 0.0, 1.0))
         risk = float(np.clip(0.7 * severity_term + 0.1 * symmetry_term + 0.1 * pose_term + 0.1 * motion_term, 0.0, 1.0))
         if fall_severity >= 2:
             risk = max(risk, 0.85)
         return risk
+
+    def _smooth_fall_risk(self, raw_fall_risk: float, fall_severity: int) -> float:
+        if self._fall_risk_ema is None:
+            self._fall_risk_ema = float(np.clip(raw_fall_risk, 0.0, 1.0))
+        else:
+            alpha = self.fall_risk_alpha_rise if raw_fall_risk >= self._fall_risk_ema else self.fall_risk_alpha_fall
+            self._fall_risk_ema = float(self._fall_risk_ema + alpha * (raw_fall_risk - self._fall_risk_ema))
+
+        if fall_severity >= 2:
+            self._fall_risk_ema = max(self._fall_risk_ema, 0.85)
+        return float(np.clip(self._fall_risk_ema, 0.0, 1.0))
 
     def _classify(
         self,
@@ -342,16 +398,65 @@ class HybridActivityFusion:
         pose_reliability: float,
         fall_risk: float,
         fall_severity: int,
+        active_motion_threshold: float,
+        active_high_motion_threshold: float,
     ) -> str:
         if fall_severity >= 2 or fall_risk >= 0.8:
             return "possible_fall"
         if gait_summary["speed_est"] >= 0.5 and gait_summary["cadence_spm"] >= 70 and gait_summary["step_symmetry"] >= 0.7:
             return "walking"
-        if motion_score >= self.high_motion_threshold:
+        if motion_score >= active_high_motion_threshold:
             return "high_motion"
-        if motion_score < self.motion_threshold and pose_reliability >= 0.6:
+        if motion_score < active_motion_threshold and pose_reliability >= 0.6:
             return "stationary"
         return "transition"
+
+    def _update_adaptive_motion_thresholds(self, motion_score: float, fall_severity: int) -> None:
+        if not self.adaptive_motion_thresholds:
+            return
+        if fall_severity >= 2:
+            return
+
+        self._threshold_frames += 1
+        reference_cap = self._adaptive_motion_threshold + max(0.03, self._adaptive_motion_threshold * 1.5)
+        reference = float(min(max(0.0, motion_score), reference_cap))
+
+        mean_alpha = self.threshold_alpha
+        dev_alpha = self.threshold_dev_alpha
+        new_mean = float((1.0 - mean_alpha) * self._motion_threshold_ema + mean_alpha * reference)
+        deviation = abs(reference - new_mean)
+        new_dev = float((1.0 - dev_alpha) * self._motion_threshold_dev_ema + dev_alpha * deviation)
+
+        self._motion_threshold_ema = new_mean
+        self._motion_threshold_dev_ema = new_dev
+
+        adaptive_motion = float(
+            np.clip(
+                new_mean + self.threshold_k * new_dev,
+                self.min_stationary_threshold,
+                self.max_stationary_threshold,
+            )
+        )
+        adaptive_high = float(
+            np.clip(
+                max(adaptive_motion * self.high_threshold_multiplier, adaptive_motion + 0.06),
+                max(self.high_motion_threshold * 0.6, adaptive_motion + 0.02),
+                self.max_high_motion_threshold,
+            )
+        )
+
+        self._adaptive_motion_threshold = adaptive_motion
+        self._adaptive_high_motion_threshold = adaptive_high
+
+    def _current_motion_thresholds(self) -> tuple[float, float]:
+        if not self.adaptive_motion_thresholds:
+            return self.motion_threshold, self.high_motion_threshold
+
+        warmup_ratio = min(1.0, self._threshold_frames / float(self.threshold_warmup_frames))
+        motion_thr = float((1.0 - warmup_ratio) * self.motion_threshold + warmup_ratio * self._adaptive_motion_threshold)
+        high_thr = float((1.0 - warmup_ratio) * self.high_motion_threshold + warmup_ratio * self._adaptive_high_motion_threshold)
+        high_thr = float(max(high_thr, motion_thr + 1e-3))
+        return motion_thr, high_thr
 
     def _stable_vote(self, newest_label: str) -> str:
         if len(self._label_history) < 3:

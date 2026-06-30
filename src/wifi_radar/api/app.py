@@ -43,6 +43,28 @@ class IngestPayload(BaseModel):
     events: List[EventPayload] = Field(default_factory=list)
 
 
+class HybridSummaryPayload(BaseModel):
+    person_id: int
+    activity_label: Optional[str] = None
+    motion_score: Optional[float] = None
+    raw_motion_score: Optional[float] = None
+    adaptive_noise_floor: Optional[float] = None
+    motion_threshold_active: Optional[float] = None
+    high_motion_threshold_active: Optional[float] = None
+    pose_reliability: Optional[float] = None
+    gait_reliability: Optional[float] = None
+    fall_risk: Optional[float] = None
+    raw_fall_risk: Optional[float] = None
+    geometry_scale: Optional[float] = None
+    cadence_spm: Optional[float] = None
+    speed_est: Optional[float] = None
+    step_symmetry: Optional[float] = None
+
+
+class HybridPeopleResponse(BaseModel):
+    per_person_hybrid: List[HybridSummaryPayload] = Field(default_factory=list)
+
+
 @dataclass
 class AppState:
     """Shared in-memory state exposed by the REST API.
@@ -184,6 +206,18 @@ def create_app(state: Optional[AppState] = None) -> FastAPI:
         if snap["gait_metrics"] is None:
             raise HTTPException(status_code=404, detail="No gait metrics available yet")
         return {"gait_metrics": snap["gait_metrics"]}
+
+    @app.get("/metrics/hybrid/people", response_model=HybridPeopleResponse)
+    def hybrid_people() -> HybridPeopleResponse:
+        snap = state.snapshot()
+        csi_summary = snap.get("csi_summary") or {}
+        raw_people = csi_summary.get("per_person_hybrid")
+        if raw_people is None:
+            raise HTTPException(status_code=404, detail="No per-person hybrid summaries available yet")
+
+        parsed = [HybridSummaryPayload.model_validate(item) for item in raw_people if isinstance(item, dict)]
+        parsed.sort(key=lambda item: item.person_id)
+        return HybridPeopleResponse(per_person_hybrid=parsed)
 
     return app
 
