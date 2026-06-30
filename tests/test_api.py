@@ -36,6 +36,12 @@ def test_api_ingest_and_status():
                 "phase_mean": -0.02,
                 "per_person_hybrid": [
                     {
+                        "person_id": 2,
+                        "activity_label": "stationary",
+                        "motion_score": 0.08,
+                        "fall_risk": 0.06,
+                    },
+                    {
                         "person_id": 1,
                         "activity_label": "walking",
                         "motion_score": 0.42,
@@ -53,4 +59,20 @@ def test_api_ingest_and_status():
     body = status.json()
     assert body["tracked_count"] == 1
     assert body["event_count"] >= 1
-    assert state.snapshot()["csi_summary"]["per_person_hybrid"][0]["person_id"] == 1
+    assert len(state.snapshot()["csi_summary"]["per_person_hybrid"]) == 2
+
+    hybrid = client.get("/metrics/hybrid/people")
+    assert hybrid.status_code == 200
+    rows = hybrid.json()["per_person_hybrid"]
+    assert [row["person_id"] for row in rows] == [1, 2]
+    assert rows[0]["activity_label"] == "walking"
+    assert rows[1]["activity_label"] == "stationary"
+
+
+def test_api_hybrid_people_not_available_before_ingest():
+    state = AppState()
+    app = create_app(state)
+    client = TestClient(app)
+
+    resp = client.get("/metrics/hybrid/people")
+    assert resp.status_code == 404
