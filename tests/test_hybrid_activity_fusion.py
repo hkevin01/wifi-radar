@@ -209,3 +209,91 @@ def test_hybrid_activity_fusion_geometry_confidence_weights_scale():
     )
 
     assert out_high["geometry_scale"] > out_low["geometry_scale"]
+
+
+def test_hybrid_activity_fusion_adaptive_motion_thresholds_personalize_cutoffs():
+    rng = np.random.default_rng(77)
+    base_amp = np.ones((3, 3, 64), dtype=np.float32)
+    base_phase = np.zeros((3, 3, 64), dtype=np.float32)
+
+    low_noise = HybridActivityFusion(window_sizes=(4, 8), threshold_warmup_frames=8)
+    high_noise = HybridActivityFusion(window_sizes=(4, 8), threshold_warmup_frames=8)
+
+    for _ in range(40):
+        amp_low = base_amp + rng.normal(0.0, 0.01, (3, 3, 64)).astype(np.float32)
+        phase_low = base_phase + rng.normal(0.0, 0.01, (3, 3, 64)).astype(np.float32)
+        low_noise.update(
+            amplitude=amp_low,
+            phase=phase_low,
+            pose_confidence=np.ones(17, dtype=np.float32) * 0.95,
+            gait_metrics=None,
+            fall_severity=0,
+        )
+
+        amp_high = base_amp + rng.normal(0.0, 0.045, (3, 3, 64)).astype(np.float32)
+        phase_high = base_phase + rng.normal(0.0, 0.045, (3, 3, 64)).astype(np.float32)
+        last_high = high_noise.update(
+            amplitude=amp_high,
+            phase=phase_high,
+            pose_confidence=np.ones(17, dtype=np.float32) * 0.95,
+            gait_metrics=None,
+            fall_severity=0,
+        )
+
+    last_low = low_noise.update(
+        amplitude=base_amp + rng.normal(0.0, 0.01, (3, 3, 64)).astype(np.float32),
+        phase=base_phase + rng.normal(0.0, 0.01, (3, 3, 64)).astype(np.float32),
+        pose_confidence=np.ones(17, dtype=np.float32) * 0.95,
+        gait_metrics=None,
+        fall_severity=0,
+    )
+
+    assert last_high["motion_threshold_active"] > last_low["motion_threshold_active"]
+    assert last_high["high_motion_threshold_active"] > last_low["high_motion_threshold_active"]
+
+
+def test_hybrid_activity_fusion_fall_risk_ema_suppresses_single_burst_spike():
+    rng = np.random.default_rng(1234)
+    fusion = HybridActivityFusion(
+        window_sizes=(4, 8),
+        fall_risk_alpha_rise=0.22,
+        fall_risk_alpha_fall=0.05,
+    )
+    base_amp = np.ones((3, 3, 64), dtype=np.float32)
+    base_phase = np.zeros((3, 3, 64), dtype=np.float32)
+
+    for _ in range(10):
+        fusion.update(
+            amplitude=base_amp + rng.normal(0.0, 0.01, (3, 3, 64)).astype(np.float32),
+            phase=base_phase + rng.normal(0.0, 0.01, (3, 3, 64)).astype(np.float32),
+            pose_confidence=np.ones(17, dtype=np.float32) * 0.95,
+            gait_metrics=None,
+            fall_severity=0,
+        )
+
+    burst = fusion.update(
+        amplitude=base_amp + rng.normal(0.0, 0.22, (3, 3, 64)).astype(np.float32),
+        phase=base_phase + rng.normal(0.0, 0.22, (3, 3, 64)).astype(np.float32),
+        pose_confidence=np.ones(17, dtype=np.float32) * 0.25,
+        gait_metrics=GaitMetrics(
+            cadence_spm=35.0,
+            stride_length=0.2,
+            step_symmetry=0.3,
+            speed_est=0.15,
+            num_steps=2,
+            window_s=8.0,
+        ),
+        fall_severity=1,
+    )
+
+    assert burst["raw_fall_risk"] > burst["fall_risk"]
+
+    recover = fusion.update(
+        amplitude=base_amp + rng.normal(0.0, 0.01, (3, 3, 64)).astype(np.float32),
+        phase=base_phase + rng.normal(0.0, 0.01, (3, 3, 64)).astype(np.float32),
+        pose_confidence=np.ones(17, dtype=np.float32) * 0.95,
+        gait_metrics=None,
+        fall_severity=0,
+    )
+
+    assert recover["fall_risk"] > recover["raw_fall_risk"]
