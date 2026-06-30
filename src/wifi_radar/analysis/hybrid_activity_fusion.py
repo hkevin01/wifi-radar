@@ -64,6 +64,7 @@ class HybridActivityFusion:
         max_high_motion_threshold: float = 0.60,
         fall_risk_alpha_rise: float = 0.45,
         fall_risk_alpha_fall: float = 0.12,
+        gait_anomaly_weight: float = 0.14,
     ) -> None:
         """Initialise rolling fusion buffers and thresholds.
 
@@ -104,6 +105,7 @@ class HybridActivityFusion:
         self.max_high_motion_threshold = float(max(self.high_motion_threshold, max_high_motion_threshold))
         self.fall_risk_alpha_rise = float(np.clip(fall_risk_alpha_rise, 1e-4, 1.0))
         self.fall_risk_alpha_fall = float(np.clip(fall_risk_alpha_fall, 1e-4, 1.0))
+        self.gait_anomaly_weight = float(np.clip(gait_anomaly_weight, 0.0, 0.35))
 
         self._prev_amplitude: Optional[np.ndarray] = None
         self._prev_phase: Optional[np.ndarray] = None
@@ -160,6 +162,7 @@ class HybridActivityFusion:
         phase: np.ndarray,
         pose_confidence: Optional[np.ndarray] = None,
         gait_metrics: Optional[Any] = None,
+        gait_anomaly: Optional[Dict[str, Any]] = None,
         fall_severity: int = 0,
         layout_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -210,12 +213,14 @@ class HybridActivityFusion:
         pose_reliability = float(np.clip(np.nanmean(pose_confidence), 0.0, 1.0)) if pose_confidence is not None else 0.0
         gait_summary = self._normalize_gait_metrics(gait_metrics)
         gait_reliability = gait_summary["gait_reliability"]
+        anomaly_term = self._normalize_gait_anomaly(gait_anomaly)
         raw_fall_risk = self._compute_fall_risk(
             motion_score=motion_score,
             pose_reliability=pose_reliability,
             gait_summary=gait_summary,
             fall_severity=fall_severity,
             active_high_motion_threshold=active_high_motion_threshold,
+            anomaly_term=anomaly_term,
         )
         fall_risk = self._smooth_fall_risk(raw_fall_risk=raw_fall_risk, fall_severity=fall_severity)
 
@@ -244,6 +249,7 @@ class HybridActivityFusion:
             "fall_risk": float(fall_risk),
             "raw_fall_risk": float(raw_fall_risk),
             "fall_risk_ema": float(fall_risk),
+            "gait_anomaly_term": float(anomaly_term),
             "geometry_scale": float(geometry_scale),
             "cadence_spm": float(gait_summary["cadence_spm"]),
             "speed_est": float(gait_summary["speed_est"]),
@@ -370,15 +376,36 @@ class HybridActivityFusion:
         gait_summary: Dict[str, float],
         fall_severity: int,
         active_high_motion_threshold: float,
+        anomaly_term: float,
     ) -> float:
         severity_term = float(np.clip(fall_severity / 2.0, 0.0, 1.0))
         symmetry_term = float(np.clip((0.7 - gait_summary["step_symmetry"]) / 0.7, 0.0, 1.0))
         pose_term = float(np.clip((0.6 - pose_reliability) / 0.6, 0.0, 1.0))
         motion_term = float(np.clip(motion_score / max(active_high_motion_threshold, 1e-6), 0.0, 1.0))
-        risk = float(np.clip(0.7 * severity_term + 0.1 * symmetry_term + 0.1 * pose_term + 0.1 * motion_term, 0.0, 1.0))
+        anomaly_weight = self.gait_anomaly_weight
+        remaining = max(0.0, 1.0 - anomaly_weight)
+        risk = float(
+            np.clip(
+                remaining * (0.7 * severity_term + 0.1 * symmetry_term + 0.1 * pose_term + 0.1 * motion_term)
+                + anomaly_weight * anomaly_term,
+                0.0,
+                1.0,
+            )
+        )
         if fall_severity >= 2:
             risk = max(risk, 0.85)
         return risk
+
+    @staticmethod
+    def _normalize_gait_anomaly(gait_anomaly: Optional[Dict[str, Any]]) -> float:
+        if not gait_anomaly:
+            return 0.0
+
+        severity = str(gait_anomaly.get("severity", "normal")).lower()
+        severity_base = {"normal": 0.0, "moderate": 0.55, "high": 1.0}.get(severity, 0.0)
+        score = float(np.clip(gait_anomaly.get("score", 0.0), 0.0, 10.0)) / 10.0
+        temporal = float(np.clip(gait_anomaly.get("temporal_score", 0.0), 0.0, 1.0))
+        return float(np.clip(0.5 * severity_base + 0.3 * score + 0.2 * temporal, 0.0, 1.0))
 
     def _smooth_fall_risk(self, raw_fall_risk: float, fall_severity: int) -> float:
         if self._fall_risk_ema is None:

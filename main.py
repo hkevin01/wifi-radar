@@ -655,8 +655,14 @@ def main():
                             person.keypoints, person.confidence, timestamp=ts_now
                         )
                         gm_person = gait_analysers[pid].get_metrics()
+                        anomaly = None
                         if gm_person is not None:
-                            anomaly = gait_anomaly_detectors[pid].update(gm_person)
+                            persistence = min(1.0, len(person.history) / 24.0)
+                            anomaly = gait_anomaly_detectors[pid].update(
+                                gm_person,
+                                person_id=pid,
+                                identity_persistence=persistence,
+                            )
                             if anomaly.get("is_anomaly"):
                                 new_fall_events.append({
                                     "person_id": pid,
@@ -671,6 +677,7 @@ def main():
                             phase=processed_phase,
                             pose_confidence=person.confidence,
                             gait_metrics=gm_person,
+                            gait_anomaly=anomaly,
                             fall_severity=int(ev.severity) if ev is not None else 0,
                         )
                         hybrid_summaries[pid] = hybrid_summary

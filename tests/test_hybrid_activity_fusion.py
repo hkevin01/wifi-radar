@@ -1,6 +1,7 @@
 import numpy as np
 
 from wifi_radar.analysis.gait_analyzer import GaitMetrics
+from wifi_radar.analysis.gait_anomaly_detector import GaitAnomalyDetector
 from wifi_radar.analysis.hybrid_activity_fusion import HybridActivityFusion
 
 
@@ -297,3 +298,61 @@ def test_hybrid_activity_fusion_fall_risk_ema_suppresses_single_burst_spike():
     )
 
     assert recover["fall_risk"] > recover["raw_fall_risk"]
+
+
+def test_hybrid_activity_fusion_mixed_gait_plus_rf_bursts_keeps_false_positive_rate_low():
+    rng = np.random.default_rng(303)
+    fusion = HybridActivityFusion(window_sizes=(4, 8, 16), hysteresis_frames=3)
+    anomaly_detector = GaitAnomalyDetector(
+        warmup_samples=8,
+        z_threshold=2.2,
+        contamination=0.2,
+        enable_unsupervised=False,
+    )
+
+    base_amp = np.ones((3, 3, 64), dtype=np.float32)
+    base_phase = np.zeros((3, 3, 64), dtype=np.float32)
+
+    false_alarms = 0
+    total = 0
+    for i in range(420):
+        is_rf_burst = (i % 70) in (0, 1, 2)
+        sigma = 0.11 if is_rf_burst else 0.018
+        amp = base_amp + rng.normal(0.0, sigma, (3, 3, 64)).astype(np.float32)
+        phase = base_phase + rng.normal(0.0, sigma, (3, 3, 64)).astype(np.float32)
+
+        if 220 <= i < 245:
+            gait = GaitMetrics(
+                cadence_spm=74.0,
+                stride_length=0.45,
+                step_symmetry=0.80,
+                speed_est=0.70,
+                num_steps=12,
+                window_s=8.0,
+            )
+        else:
+            gait = GaitMetrics(
+                cadence_spm=98.0,
+                stride_length=0.58,
+                step_symmetry=0.95,
+                speed_est=1.05,
+                num_steps=12,
+                window_s=8.0,
+            )
+
+        anomaly = anomaly_detector.update(gait, person_id=1, identity_persistence=1.0)
+        out = fusion.update(
+            amplitude=amp,
+            phase=phase,
+            pose_confidence=np.ones(17, dtype=np.float32) * 0.92,
+            gait_metrics=gait,
+            gait_anomaly=anomaly,
+            fall_severity=0,
+        )
+
+        total += 1
+        if out["activity_label"] == "possible_fall" or out["fall_risk"] >= 0.8:
+            false_alarms += 1
+
+    fp_rate = false_alarms / max(1, total)
+    assert fp_rate < 0.03
