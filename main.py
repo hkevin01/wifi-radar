@@ -733,6 +733,10 @@ def main():
                         )
 
                     if api_state is not None:
+                        per_person_hybrid = [
+                            {"person_id": int(pid), **summary}
+                            for pid, summary in sorted(hybrid_summaries.items(), key=lambda kv: kv[0])
+                        ]
                         api_state.ingest({
                             "tracked_people": [
                                 {"keypoints": t.keypoints.tolist() if hasattr(t.keypoints, "tolist") else t.keypoints,
@@ -747,6 +751,7 @@ def main():
                                 "activity_label": gait_metrics_dict.get("activity_label") if gait_metrics_dict else None,
                                 "motion_score": gait_metrics_dict.get("motion_score") if gait_metrics_dict else None,
                                 "fall_risk": gait_metrics_dict.get("fall_risk") if gait_metrics_dict else None,
+                                "per_person_hybrid": per_person_hybrid,
                             },
                             "events": new_fall_events,
                         })

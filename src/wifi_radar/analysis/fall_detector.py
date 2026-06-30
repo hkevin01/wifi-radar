@@ -119,6 +119,8 @@ class FallDetector:
         height_drop_frac: float = 0.35,
         recovery_frames: int = 15,
         alert_timeout_s: float = 5.0,
+        adaptive_calibration: bool = True,
+        calibration_warmup_frames: int = 12,
     ) -> None:
         """Initialise state machine, rolling history buffers, and thresholds.
 
@@ -158,11 +160,18 @@ class FallDetector:
         References:
             collections.deque; FallSeverity.NORMAL; WR-ANALYSIS-FALL-CLASS-001.
         """
-        self.velocity_threshold  = velocity_threshold
-        self.angle_threshold_deg = angle_threshold_deg
+        self.person_id = int(person_id)
+        self.velocity_threshold  = float(velocity_threshold)
+        self.angle_threshold_deg = float(angle_threshold_deg)
+        self._base_velocity_threshold = float(velocity_threshold)
+        self._base_angle_threshold_deg = float(angle_threshold_deg)
+        self._current_velocity_threshold = float(velocity_threshold)
+        self._current_angle_threshold_deg = float(angle_threshold_deg)
         self.height_drop_frac    = height_drop_frac
         self.recovery_frames     = recovery_frames
         self.alert_timeout_s     = alert_timeout_s
+        self.adaptive_calibration = bool(adaptive_calibration)
+        self.calibration_warmup_frames = int(max(4, calibration_warmup_frames))
 
         self._centroid_z_history: deque = deque(maxlen=history_window)
         self._angle_history:      deque = deque(maxlen=history_window)
@@ -236,11 +245,13 @@ class FallDetector:
                 self._standing_z = float(np.median(list(self._centroid_z_history)))
             return None
 
+        self._update_adaptive_thresholds()
+
         velocity = self._centroid_velocity()
         event: Optional[FallEvent] = None
 
         if self._state == FallSeverity.NORMAL:
-            if velocity < self.velocity_threshold and angle > self.angle_threshold_deg:
+            if velocity < self._current_velocity_threshold and angle > self._current_angle_threshold_deg:
                 self._state = FallSeverity.POSSIBLE_FALL
                 event = self._make_event(centroid, centroid, angle)
                 logger.debug("Person %d: POSSIBLE_FALL (vel=%.3f, angle=%.1f°)",
@@ -255,7 +266,7 @@ class FallDetector:
                     (0.0, 0.0, self._standing_z), centroid, angle
                 )
                 logger.warning("Person %d: FALL_DETECTED (drop=%.0f%%)", self.person_id, height_drop * 100)
-            elif velocity > abs(self.velocity_threshold) * 0.5 and angle < self.angle_threshold_deg * 0.6:
+            elif velocity > abs(self._current_velocity_threshold) * 0.5 and angle < self._current_angle_threshold_deg * 0.6:
                 # Quick recovery — false positive
                 self._state = FallSeverity.NORMAL
 
@@ -302,6 +313,12 @@ class FallDetector:
         References:
             FallSeverity; WR-ANALYSIS-FALL-CLASS-001.
         """
+        return self._state
+
+    @property
+    def adaptive_thresholds(self) -> Tuple[float, float]:
+        """Return the currently active adaptive thresholds (velocity, angle)."""
+        return self._current_velocity_threshold, self._current_angle_threshold_deg
 
     # ------------------------------------------------------------------ #
     # Private helpers                                                      #
@@ -480,12 +497,47 @@ class FallDetector:
         """
         standing_z = self._standing_z or 0.0
         z_ok = centroid[2] > standing_z - abs(standing_z) * self.height_drop_frac * 0.5
-        angle_ok = angle < self.angle_threshold_deg * 0.5
+        angle_ok = angle < self._current_angle_threshold_deg * 0.5
         if z_ok and angle_ok:
             self._standing_frames += 1
         else:
             self._standing_frames = 0
         return self._standing_frames >= self.recovery_frames
+
+    def _update_adaptive_thresholds(self) -> None:
+        if not self.adaptive_calibration:
+            self._current_velocity_threshold = self.velocity_threshold
+            self._current_angle_threshold_deg = self.angle_threshold_deg
+            return
+
+        z_hist = np.asarray(self._centroid_z_history, dtype=np.float32)
+        t_hist = np.asarray(self._timestamps, dtype=np.float64)
+        a_hist = np.asarray(self._angle_history, dtype=np.float32)
+        if z_hist.size < self.calibration_warmup_frames or a_hist.size < self.calibration_warmup_frames:
+            return
+
+        dz = np.diff(z_hist)
+        dt = np.diff(t_hist)
+        valid = dt > 1e-5
+        if not np.any(valid):
+            return
+        velocities = dz[valid] / dt[valid]
+
+        base_mag = abs(self._base_velocity_threshold)
+        vel_noise = float(np.std(velocities))
+        vel_mag = np.clip(base_mag + 2.5 * vel_noise, base_mag * 0.75, base_mag * 2.5)
+        self._current_velocity_threshold = -float(vel_mag)
+
+        upright = float(np.median(a_hist))
+        angle_dev = float(np.std(a_hist))
+        ang_candidate = upright + 3.0 * angle_dev + 8.0
+        self._current_angle_threshold_deg = float(
+            np.clip(
+                ang_candidate,
+                self._base_angle_threshold_deg * 0.7,
+                self._base_angle_threshold_deg * 1.6,
+            )
+        )
 
     def _make_event(
         self,

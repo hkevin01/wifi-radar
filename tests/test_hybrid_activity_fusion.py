@@ -64,3 +64,37 @@ def test_hybrid_activity_fusion_escalates_possible_fall():
 
     assert result["activity_label"] == "possible_fall"
     assert result["fall_risk"] >= 0.8
+
+
+def test_hybrid_activity_fusion_adaptive_floor_suppresses_jitter():
+    fusion = HybridActivityFusion(window_sizes=(4, 8), motion_threshold=0.05)
+    base_amp = np.ones((3, 3, 64), dtype=np.float32)
+    base_phase = np.zeros((3, 3, 64), dtype=np.float32)
+
+    outputs = []
+    for _ in range(24):
+        amp = base_amp + np.random.randn(3, 3, 64).astype(np.float32) * 0.01
+        phase = base_phase + np.random.randn(3, 3, 64).astype(np.float32) * 0.01
+        outputs.append(
+            fusion.update(
+                amplitude=amp,
+                phase=phase,
+                pose_confidence=np.ones(17, dtype=np.float32) * 0.95,
+                gait_metrics=None,
+            )
+        )
+
+    final = outputs[-1]
+    assert final["adaptive_noise_floor"] >= 0.0
+    assert final["motion_score"] < 0.08
+    assert final["activity_label"] in {"stationary", "transition"}
+
+
+def test_hybrid_activity_fusion_returns_motion_debug_fields():
+    fusion = HybridActivityFusion(window_sizes=(4,))
+    amp = np.random.randn(3, 3, 64).astype(np.float32)
+    phase = np.random.randn(3, 3, 64).astype(np.float32)
+    out = fusion.update(amplitude=amp, phase=phase, pose_confidence=np.ones(17, dtype=np.float32))
+
+    assert "raw_motion_score" in out
+    assert "adaptive_noise_floor" in out

@@ -48,6 +48,11 @@ class HybridActivityFusion:
         window_sizes: Iterable[int] = (4, 8, 16),
         motion_threshold: float = 0.05,
         high_motion_threshold: float = 0.18,
+        motion_ema_alpha: float = 0.08,
+        motion_dev_alpha: float = 0.10,
+        noise_floor_k: float = 2.0,
+        min_motion_scale: float = 0.05,
+        hysteresis_frames: int = 3,
     ) -> None:
         """Initialise rolling fusion buffers and thresholds.
 
@@ -72,6 +77,11 @@ class HybridActivityFusion:
         self.window_sizes = tuple(sizes)
         self.motion_threshold = float(motion_threshold)
         self.high_motion_threshold = float(high_motion_threshold)
+        self.motion_ema_alpha = float(np.clip(motion_ema_alpha, 1e-4, 1.0))
+        self.motion_dev_alpha = float(np.clip(motion_dev_alpha, 1e-4, 1.0))
+        self.noise_floor_k = float(max(0.0, noise_floor_k))
+        self.min_motion_scale = float(max(1e-4, min_motion_scale))
+        self.hysteresis_frames = int(max(1, hysteresis_frames))
 
         self._prev_amplitude: Optional[np.ndarray] = None
         self._prev_phase: Optional[np.ndarray] = None
@@ -79,6 +89,11 @@ class HybridActivityFusion:
             size: deque(maxlen=size) for size in self.window_sizes
         }
         self._label_history: Deque[str] = deque(maxlen=max(3, len(self.window_sizes) * 2))
+        self._motion_ema: Optional[float] = None
+        self._motion_dev_ema: float = 0.0
+        self._active_label: Optional[str] = None
+        self._pending_label: Optional[str] = None
+        self._pending_label_frames: int = 0
 
     def reset(self) -> None:
         """Reset all internal state for a new session.
@@ -99,6 +114,11 @@ class HybridActivityFusion:
         for window in self._motion_windows.values():
             window.clear()
         self._label_history.clear()
+        self._motion_ema = None
+        self._motion_dev_ema = 0.0
+        self._active_label = None
+        self._pending_label = None
+        self._pending_label_frames = 0
 
     def update(
         self,
@@ -147,8 +167,9 @@ class HybridActivityFusion:
             window.append(delta_score)
 
         fused_motion = self._fuse_motion_windows()
+        motion_after_floor, adaptive_floor = self._apply_adaptive_floor(fused_motion)
         geometry_scale = self._estimate_geometry_scale(layout_metadata)
-        motion_score = fused_motion * geometry_scale
+        motion_score = motion_after_floor * geometry_scale
 
         pose_reliability = float(np.clip(np.nanmean(pose_confidence), 0.0, 1.0)) if pose_confidence is not None else 0.0
         gait_summary = self._normalize_gait_metrics(gait_metrics)
@@ -168,11 +189,14 @@ class HybridActivityFusion:
             fall_severity=fall_severity,
         )
         self._label_history.append(label)
-        stable_label = self._stable_vote(label)
+        voted_label = self._stable_vote(label)
+        stable_label = self._apply_hysteresis(voted_label)
 
         return {
             "activity_label": stable_label,
             "motion_score": float(motion_score),
+            "raw_motion_score": float(fused_motion),
+            "adaptive_noise_floor": float(adaptive_floor),
             "pose_reliability": float(pose_reliability),
             "gait_reliability": float(gait_reliability),
             "fall_risk": float(fall_risk),
@@ -190,12 +214,13 @@ class HybridActivityFusion:
 
         amp_delta = float(np.mean(np.abs(amplitude - self._prev_amplitude)))
         phase_delta = float(np.mean(np.abs(phase - self._prev_phase)))
-        amp_scale = float(np.std(amplitude) + 1e-6)
-        phase_scale = float(np.std(phase) + 1e-6)
+        amp_scale = float(max(np.std(amplitude), self.min_motion_scale))
+        phase_scale = float(max(np.std(phase), self.min_motion_scale))
 
         self._prev_amplitude = amplitude.copy()
         self._prev_phase = phase.copy()
-        return max(0.0, 0.5 * (amp_delta / amp_scale + phase_delta / phase_scale))
+        raw_score = 0.5 * (amp_delta / amp_scale + phase_delta / phase_scale)
+        return float(np.clip(raw_score, 0.0, 4.0))
 
     def _fuse_motion_windows(self) -> float:
         if not self._motion_windows:
@@ -206,17 +231,59 @@ class HybridActivityFusion:
             summaries.append(float(np.mean(values)) if values else 0.0)
         return float(np.mean(summaries))
 
+    def _apply_adaptive_floor(self, fused_motion: float) -> tuple[float, float]:
+        # The first valid sample defines the initial baseline and no floor is applied.
+        if self._motion_ema is None:
+            self._motion_ema = float(max(0.0, fused_motion))
+            self._motion_dev_ema = 0.0
+            return float(max(0.0, fused_motion)), 0.0
+
+        baseline = float(max(0.0, self._motion_ema))
+        floor = float(max(0.0, baseline + self.noise_floor_k * self._motion_dev_ema))
+        adjusted = float(max(0.0, fused_motion - floor))
+
+        mean_alpha = self.motion_ema_alpha
+        dev_alpha = self.motion_dev_alpha
+
+        # Update the noise baseline using only the low-motion envelope.
+        # This avoids learning true walking motion as background noise.
+        low_motion_cap = baseline + self.motion_threshold
+        reference = float(min(fused_motion, low_motion_cap))
+
+        new_mean = float((1.0 - mean_alpha) * self._motion_ema + mean_alpha * reference)
+        deviation = abs(reference - new_mean)
+        new_dev = float((1.0 - dev_alpha) * self._motion_dev_ema + dev_alpha * deviation)
+
+        self._motion_ema = new_mean
+        self._motion_dev_ema = new_dev
+        return adjusted, floor
+
     def _estimate_geometry_scale(self, layout_metadata: Optional[Dict[str, Any]]) -> float:
         if not layout_metadata:
             return 1.0
 
+        confidence = float(
+            np.clip(
+                layout_metadata.get(
+                    "geometry_confidence",
+                    layout_metadata.get("layout_confidence", 1.0),
+                ),
+                0.0,
+                1.0,
+            )
+        )
+
         tx_positions = np.asarray(layout_metadata.get("tx_positions", []), dtype=np.float32)
         rx_positions = np.asarray(layout_metadata.get("rx_positions", []), dtype=np.float32)
+        dist_scale = 1.0
         if tx_positions.ndim == 2 and rx_positions.ndim == 2 and tx_positions.size and rx_positions.size:
             diffs = tx_positions[:, None, :] - rx_positions[None, :, :]
             mean_dist = float(np.mean(np.linalg.norm(diffs, axis=-1)))
-            return float(np.clip(0.85 + mean_dist / 10.0, 0.85, 1.15))
-        return 1.0
+            dist_scale = float(np.clip(0.85 + mean_dist / 10.0, 0.85, 1.15))
+
+        confidence_scale = 0.9 + 0.2 * confidence
+        blended_dist = 1.0 + confidence * (dist_scale - 1.0)
+        return float(np.clip(blended_dist * confidence_scale, 0.80, 1.20))
 
     def _normalize_gait_metrics(self, gait_metrics: Optional[Any]) -> Dict[str, float]:
         if gait_metrics is None:
@@ -291,3 +358,32 @@ class HybridActivityFusion:
             return newest_label
         counts = Counter(self._label_history)
         return counts.most_common(1)[0][0]
+
+    def _apply_hysteresis(self, candidate_label: str) -> str:
+        if self._active_label is None:
+            self._active_label = candidate_label
+            return candidate_label
+
+        if candidate_label == self._active_label:
+            self._pending_label = None
+            self._pending_label_frames = 0
+            return self._active_label
+
+        if candidate_label != self._pending_label:
+            self._pending_label = candidate_label
+            self._pending_label_frames = 1
+        else:
+            self._pending_label_frames += 1
+
+        needed = self.hysteresis_frames
+        if candidate_label == "possible_fall":
+            needed = 1
+        elif self._active_label == "possible_fall" and candidate_label != "possible_fall":
+            needed = max(2, self.hysteresis_frames)
+
+        if self._pending_label_frames >= needed:
+            self._active_label = candidate_label
+            self._pending_label = None
+            self._pending_label_frames = 0
+
+        return self._active_label
