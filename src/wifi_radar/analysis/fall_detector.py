@@ -46,6 +46,11 @@ class FallSeverity(IntEnum):
         FallDetector._state; FallEvent.severity; WR-ANALYSIS-FALL-001.
     """
 
+    NORMAL = 0
+    POSSIBLE_FALL = 1
+    FALL_DETECTED = 2
+    ALERT = 3
+
 
 @dataclass
 class FallEvent:

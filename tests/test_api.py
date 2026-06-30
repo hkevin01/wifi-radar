@@ -31,6 +31,18 @@ def test_api_ingest_and_status():
         json={
             "tracked_people": [{"person_id": 1, "confidence": [1.0] * 17, "keypoints": [[0, 0, 0]] * 17}],
             "gait_metrics": {"cadence_spm": 100, "stride_length": 0.6, "step_symmetry": 1.0, "speed_est": 1.0, "num_steps": 8, "window_s": 5.0},
+            "csi_summary": {
+                "amplitude_mean": 0.11,
+                "phase_mean": -0.02,
+                "per_person_hybrid": [
+                    {
+                        "person_id": 1,
+                        "activity_label": "walking",
+                        "motion_score": 0.42,
+                        "fall_risk": 0.08,
+                    }
+                ],
+            },
             "events": [{"message": "fall alert", "severity": 2}],
         },
     )
@@ -41,3 +53,4 @@ def test_api_ingest_and_status():
     body = status.json()
     assert body["tracked_count"] == 1
     assert body["event_count"] >= 1
+    assert state.snapshot()["csi_summary"]["per_person_hybrid"][0]["person_id"] == 1
